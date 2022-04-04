@@ -14,17 +14,16 @@ use core::{
     mem::{self, MaybeUninit},
     num::NonZeroUsize,
     ptr::NonNull,
-    slice,
 };
 
 use crate::bitmap::Bitmap;
 
-fn round_up_pow2(x: u64) -> Option<u64> {
+fn round_up_pow2(x: usize) -> Option<usize> {
     match x {
         0 => None,
         1 => Some(1),
         x if x >= (1 << 63) => None,
-        _ => Some(2u64.pow((x - 1).log2() as u32 + 1)),
+        _ => Some(2usize.pow((x - 1).log2() as u32 + 1)),
     }
 }
 
@@ -38,7 +37,7 @@ struct BuddyLink {
     // but by forgoing a pointer, it does not imply a borrow.
     //
     // NOTE: Any pointer to a block must be acquired via the allocator base
-    // pointer!
+    // pointer, and NOT by casting this address directly!
     next: Option<NonZeroUsize>,
 }
 
@@ -71,17 +70,12 @@ impl BuddyLink {
 }
 
 /// Calculates the offset from `base` to `block`.
-fn base_to_block_ofs(base: NonNull<u8>, block: NonZeroUsize) -> u64 {
-    block
-        .get()
-        .checked_sub(base.addr().get())
-        .unwrap()
-        .try_into()
-        .unwrap()
+fn base_to_block_ofs(base: NonNull<u8>, block: NonZeroUsize) -> usize {
+    block.get().checked_sub(base.addr().get()).unwrap()
 }
 
 struct BuddyLevel {
-    block_size: u64,
+    block_size: usize,
     free_list: Option<NonZeroUsize>,
     buddies: Bitmap,
     splits: Option<Bitmap>,
@@ -91,23 +85,23 @@ impl BuddyLevel {
     /// Retrieves the index of the block which starts `block_ofs` bytes from the
     /// base.
     #[inline]
-    fn index_of(&self, block_ofs: u64) -> usize {
+    fn index_of(&self, block_ofs: usize) -> usize {
         assert_eq!(block_ofs % self.block_size, 0);
 
-        (block_ofs / self.block_size).try_into().unwrap()
+        block_ofs.checked_div(self.block_size).unwrap()
     }
 
     /// Retrieves the index of the buddy bit for the block which starts
     /// `block_ofs` bytes from the base.
     #[inline]
-    fn buddy_bit(&self, block_ofs: u64) -> usize {
-        self.index_of(block_ofs) / 2
+    fn buddy_bit(&self, block_ofs: usize) -> usize {
+        self.index_of(block_ofs).checked_div(2).unwrap()
     }
 
     /// Retrieves the offset of the buddy block of the block which starts
     /// `block_ofs` bytes from the base.
     #[inline]
-    fn buddy_ofs(&self, block_ofs: u64) -> u64 {
+    fn buddy_ofs(&self, block_ofs: usize) -> usize {
         block_ofs ^ self.block_size
     }
 
@@ -115,7 +109,7 @@ impl BuddyLevel {
     ///
     /// If the free list is empty, returns `None`.
     unsafe fn free_list_pop(&mut self, base: NonNull<u8>) -> Option<NonZeroUsize> {
-        let mut head = self.free_list.take()?;
+        let head = self.free_list.take()?;
 
         unsafe {
             let link_mut = base.with_addr(head).cast::<BuddyLink>().as_mut();
@@ -142,7 +136,7 @@ impl BuddyLevel {
         base: NonNull<u8>,
         block: NonZeroUsize,
     ) -> Option<NonZeroUsize> {
-        let mut head = self.free_list?;
+        let head = self.free_list?;
 
         if head == block {
             unsafe {
@@ -163,7 +157,7 @@ impl BuddyLevel {
                 None => break,
             };
 
-            let mut prev = cur;
+            let prev = cur;
             cur = next;
             assert!(prev != cur);
 
@@ -218,14 +212,7 @@ impl BuddyLevel {
         // an address.  This indicates to the compiler that the base pointer has
         // sole access to the block.
         let block = block.addr();
-
-        let block_ofs: u64 = block
-            .get()
-            .checked_sub(base.addr().get())
-            .unwrap()
-            .try_into()
-            .unwrap();
-
+        let block_ofs = base_to_block_ofs(base, block);
         let buddy_bit = self.buddy_bit(block_ofs);
         self.buddies.toggle(buddy_bit);
 
@@ -239,13 +226,8 @@ impl BuddyLevel {
             None
         } else {
             let buddy_ofs = self.buddy_ofs(block_ofs);
-            let buddy = NonZeroUsize::new(
-                base.addr()
-                    .get()
-                    .checked_add(buddy_ofs.try_into().unwrap())
-                    .unwrap(),
-            )
-            .unwrap();
+            let buddy =
+                NonZeroUsize::new(base.addr().get().checked_add(buddy_ofs).unwrap()).unwrap();
 
             // Remove the buddy block from the free list.
             if unsafe { self.free_list_find_remove(base, buddy) }.is_none() {
@@ -270,7 +252,7 @@ pub struct BuddyAllocator<const ORDER: usize, const PGSIZE: usize> {
     /// that it may be returned in `into_raw_parts()`.
     metadata: *mut u8,
     /// The number of zero-order blocks managed by this allocator.
-    num_blocks: u64,
+    num_blocks: usize,
     levels: [BuddyLevel; ORDER],
 }
 
@@ -322,8 +304,8 @@ impl<const ORDER: usize, const PGSIZE: usize> BuddyAllocator<ORDER, PGSIZE> {
             // - 3, then 2 split bitmaps are needed of total size (3 - 1)K + (2 - 1)K = 3K.
             // - ...
             // - N, then 2 ^ (N - 2) split bitmaps are needed of total size
-            //   (N - 1)K + (N - 2)K + ... + (2 - 1)K = 2 * (2 ^ (N - 1) - 1)
-            //                                        = sum from x = 1 to (N - 1) of 2^x
+            //   (N - 1)K + (N - 2)K + ... + (2 - 1)K = 2 * (2 ^ (N - 1) - 1) * K
+            //                                        = (sum from x = 1 to (N - 1) of 2^x) * K
             let split_pow = order - 1;
 
             let (split_layout, _) = split_l0_layout
@@ -385,7 +367,7 @@ impl<const ORDER: usize, const PGSIZE: usize> BuddyAllocator<ORDER, PGSIZE> {
 
             unsafe {
                 level.as_mut_ptr().write(BuddyLevel {
-                    block_size: block_size as u64,
+                    block_size,
                     free_list: None,
                     buddies: buddy_bitmap,
                     splits: split_bitmap,
@@ -402,7 +384,7 @@ impl<const ORDER: usize, const PGSIZE: usize> BuddyAllocator<ORDER, PGSIZE> {
         // Initialize the top-level free list by emplacing links in each block.
         let mut next_link = None;
         for block_idx in (0..num_blocks).rev() {
-            let block_offset = block_idx * levels[0].block_size as usize;
+            let block_offset = block_idx * levels[0].block_size;
 
             let link = unsafe {
                 // TODO: use NonZeroUsize::checked_add (this is usize::checked_add)
@@ -423,26 +405,26 @@ impl<const ORDER: usize, const PGSIZE: usize> BuddyAllocator<ORDER, PGSIZE> {
         BuddyAllocator {
             base,
             metadata,
-            num_blocks: num_blocks as u64,
+            num_blocks,
             levels,
         }
     }
 
-    fn alloc_level_and_size(&self, size: u64) -> Option<(usize, usize)> {
+    fn alloc_level(&self, size: usize) -> Option<usize> {
         let max_block_size = self.levels[0].block_size;
         if size > max_block_size {
             return None;
         }
 
-        let alloc_size = cmp::max(round_up_pow2(size).unwrap() as usize, PGSIZE);
+        let alloc_size = cmp::max(round_up_pow2(size).unwrap(), PGSIZE);
         let level: usize = (max_block_size.log2() - alloc_size.log2())
             .try_into()
             .unwrap();
 
-        Some((level, alloc_size))
+        Some(level)
     }
 
-    fn min_free_level(&self, block_ofs: u64) -> usize {
+    fn min_free_level(&self, block_ofs: usize) -> usize {
         let max_block_size = self.levels[0].block_size;
 
         if block_ofs == 0 {
@@ -454,19 +436,19 @@ impl<const ORDER: usize, const PGSIZE: usize> BuddyAllocator<ORDER, PGSIZE> {
             return 0;
         }
 
-        assert!(max_size >= PGSIZE as u64);
+        assert!(max_size >= PGSIZE);
 
         (max_block_size.log2() - max_size.log2())
             .try_into()
             .unwrap()
     }
 
-    pub unsafe fn allocate(&mut self, size: u64) -> Option<NonNull<u8>> {
+    pub unsafe fn allocate(&mut self, size: usize) -> Option<NonNull<u8>> {
         if size == 0 {
             return None;
         }
 
-        let (target_level, alloc_size) = self.alloc_level_and_size(size)?;
+        let target_level = self.alloc_level(size)?;
 
         // If there is a free block of the correct size, return it immediately.
         if let Some(block) = unsafe { self.levels[target_level].allocate_one(self.base) } {
@@ -484,7 +466,7 @@ impl<const ORDER: usize, const PGSIZE: usize> BuddyAllocator<ORDER, PGSIZE> {
         // suitably sized block.
         for level in init_level..target_level {
             // Split the block. The address of the front half does not change.
-            let half_block_size = usize::try_from(self.levels[level].block_size / 2).unwrap();
+            let half_block_size = self.levels[level].block_size / 2;
             let back_half = NonZeroUsize::new(block.addr().get() + half_block_size).unwrap();
 
             // Mark the block as split.
@@ -500,15 +482,13 @@ impl<const ORDER: usize, const PGSIZE: usize> BuddyAllocator<ORDER, PGSIZE> {
         // The block was located via links in the free list, which do not have
         // the provenance of the allocator region. In order to avoid UB, the
         // pointer needs to come from the allocator's base pointer.
-        let block_ptr = self.base.with_addr(block.addr());
-        let block_slice = unsafe { slice::from_raw_parts_mut(block_ptr.as_ptr(), alloc_size) };
-        Some(NonNull::new(block_slice.as_mut_ptr()).unwrap())
+        Some(self.base.with_addr(block.addr()))
     }
 
     pub unsafe fn free(&mut self, block: NonNull<u8>) {
         // Some addresses can't come from earlier levels because their addresses
         // imply a smaller block size.
-        let block_ofs: u64 = unsafe { block.as_ptr().offset_from(self.base.as_ptr()) }
+        let block_ofs: usize = unsafe { block.as_ptr().offset_from(self.base.as_ptr()) }
             .try_into()
             .unwrap();
         let min_level = self.min_free_level(block_ofs);
@@ -589,7 +569,7 @@ mod tests {
     unsafe fn free_with_global<const ORDER: usize, const PGSIZE: usize>(
         allocator: BuddyAllocator<ORDER, PGSIZE>,
     ) {
-        let num_blocks = allocator.num_blocks as usize;
+        let num_blocks = allocator.num_blocks;
 
         let region_layout = BuddyAllocator::<ORDER, PGSIZE>::region_layout(num_blocks);
         let metadata_layout = BuddyAllocator::<ORDER, PGSIZE>::metadata_layout(num_blocks);
@@ -627,7 +607,7 @@ mod tests {
             {
                 // Do this in a separate scope so that the slice no longer
                 // exists when ptr is freed
-                let buf: &mut [u8] = slice::from_raw_parts_mut(ptr.as_ptr(), size as usize);
+                let buf: &mut [u8] = slice::from_raw_parts_mut(ptr.as_ptr(), size);
                 for (i, byte) in buf.iter_mut().enumerate() {
                     *byte = i as u8;
                 }
@@ -651,26 +631,26 @@ mod tests {
 
         unsafe {
             // Allocate two minimum-size blocks to split the top block.
-            let a = allocator.allocate(PGSIZE as u64).unwrap();
-            let b = allocator.allocate(PGSIZE as u64).unwrap();
+            let a = allocator.allocate(PGSIZE).unwrap();
+            let b = allocator.allocate(PGSIZE).unwrap();
 
             // Free both blocks, coalescing them.
             allocator.free(a);
             allocator.free(b);
 
             // Allocate the entire region to ensure coalescing worked.
-            let c = allocator.allocate(2 * PGSIZE as u64).unwrap();
+            let c = allocator.allocate(2 * PGSIZE).unwrap();
             allocator.free(c);
 
             // Same as above.
-            let a = allocator.allocate(PGSIZE as u64).unwrap();
-            let b = allocator.allocate(PGSIZE as u64).unwrap();
+            let a = allocator.allocate(PGSIZE).unwrap();
+            let b = allocator.allocate(PGSIZE).unwrap();
 
             // Free both blocks, this time in reverse order.
             allocator.free(a);
             allocator.free(b);
 
-            let c = allocator.allocate(2 * PGSIZE as u64).unwrap();
+            let c = allocator.allocate(2 * PGSIZE).unwrap();
             allocator.free(c);
         }
 
@@ -689,18 +669,16 @@ mod tests {
             let alloc_size = 2usize.pow((ORDER - o - 1) as u32) * PGSIZE;
             let num_allocs = 2usize.pow(o as u32) * NUM_BLOCKS;
 
-            std::println!("order {o}: size={alloc_size}, count={num_allocs}");
-
             let mut allocs = Vec::with_capacity(num_allocs);
             for i in 0..num_allocs {
-                let ptr = unsafe { allocator.allocate(alloc_size as u64).unwrap() };
+                let ptr = unsafe { allocator.allocate(alloc_size).unwrap() };
                 std::println!("alloced {i}");
 
                 {
                     // Do this in a separate scope so that the slice no longer
                     // exists when ptr is freed
                     let buf: &mut [u8] =
-                        unsafe { slice::from_raw_parts_mut(ptr.as_ptr(), alloc_size as usize) };
+                        unsafe { slice::from_raw_parts_mut(ptr.as_ptr(), alloc_size) };
                     for (i, byte) in buf.iter_mut().enumerate() {
                         *byte = (i % 256) as u8;
                     }
