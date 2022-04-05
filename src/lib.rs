@@ -47,11 +47,12 @@ use sptr::Strict;
 #[cfg(all(feature = "sptr", not(feature = "unstable")))]
 use crate::polyfill::*;
 
-/// A link in a linked list of buddy blocks.
+/// A link in a linked list of blocks of memory.
 ///
-/// This type is meant to be embedded in the block itself.
+/// This type is meant to be embedded in the block itself, forming an intrusive
+/// linked list.
 #[repr(C)]
-struct BuddyLink {
+struct BlockLink {
     // Rather than using a pointer, store only the address of the next link.
     // This avoids accidentally violating stacked borrows; the link "points to"
     // the next block, but by forgoing an actual pointer, it does not imply a
@@ -63,30 +64,30 @@ struct BuddyLink {
 }
 
 #[cfg(any(feature = "sptr", feature = "unstable"))]
-impl BuddyLink {
-    /// Initializes a `BuddyLink` at the pointed-to location.
+impl BlockLink {
+    /// Initializes a `BlockLink` at the pointed-to location.
     ///
-    /// The address of the initialized `BuddyLink` is returned rather than the
+    /// The address of the initialized `BlockLink` is returned rather than the
     /// pointer. This indicates to the compiler that any effective mutable
     /// borrow of `ptr` has ended.
     ///
     /// # Safety
     ///
     /// The caller must uphold the following invariants:
-    /// - `ptr` must be valid for reads and writes for `size_of::<BuddyLink>()`
+    /// - `ptr` must be valid for reads and writes for `size_of::<BlockLink>()`
     ///   bytes.
     /// - If `next` is `Some(n)`, then `n` must be the address of an
-    ///   initialized `BuddyLink` value.
+    ///   initialized `BlockLink` value.
     unsafe fn init(
-        mut ptr: NonNull<MaybeUninit<BuddyLink>>,
+        mut ptr: NonNull<MaybeUninit<BlockLink>>,
         next: Option<NonZeroUsize>,
     ) -> NonZeroUsize {
-        assert_eq!(ptr.as_ptr().align_offset(mem::align_of::<BuddyLink>()), 0);
+        assert_eq!(ptr.as_ptr().align_offset(mem::align_of::<BlockLink>()), 0);
 
         let addr = unsafe {
             let uninit_mut: &mut MaybeUninit<_> = ptr.as_mut();
             let ptr = uninit_mut.as_mut_ptr();
-            ptr.write(BuddyLink { next });
+            ptr.write(BlockLink { next });
             ptr.addr()
         };
 
@@ -107,16 +108,16 @@ impl BasePtr {
         block.get().checked_sub(self.ptr.addr().get()).unwrap()
     }
 
-    /// Returns a mutable reference to the `BuddyLink` at `link`.
+    /// Returns a mutable reference to the `BlockLink` at `link`.
     ///
     /// # Safety
     ///
     /// The caller must uphold the following invariants:
-    /// - `link` must be a properly aligned address for `BuddyLink` values.
-    /// - The memory at `link` must contain a properly initialized `BuddyLink` value.
+    /// - `link` must be a properly aligned address for `BlockLink` values.
+    /// - The memory at `link` must contain a properly initialized `BlockLink` value.
     /// - The memory at `link` must be unallocated by the associated allocator.
-    unsafe fn link_mut<'a>(self, link: NonZeroUsize) -> &'a mut BuddyLink {
-        unsafe { self.ptr.with_addr(link).cast::<BuddyLink>().as_mut() }
+    unsafe fn link_mut<'a>(self, link: NonZeroUsize) -> &'a mut BlockLink {
+        unsafe { self.ptr.with_addr(link).cast::<BlockLink>().as_mut() }
     }
 
     /// Creates a new pointer with the given address.

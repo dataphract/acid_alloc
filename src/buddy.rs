@@ -14,7 +14,7 @@ use core::alloc::{AllocError, Allocator};
 #[cfg(all(any(feature = "alloc", test), feature = "unstable"))]
 use alloc::alloc::Global;
 
-use crate::{bitmap::Bitmap, BackingAllocator, BasePtr, BuddyLink, Raw};
+use crate::{bitmap::Bitmap, BackingAllocator, BasePtr, BlockLink, Raw};
 
 #[cfg(not(feature = "unstable"))]
 use crate::polyfill::*;
@@ -66,10 +66,10 @@ impl BuddyLevel {
 
     /// Pushes a block onto the free list.
     unsafe fn free_list_push(&mut self, base: BasePtr, block: NonZeroUsize) {
-        assert_eq!(block.get() & (mem::align_of::<BuddyLink>() - 1), 0);
+        assert_eq!(block.get() & (mem::align_of::<BlockLink>() - 1), 0);
 
-        let uninit = base.with_addr(block).cast::<MaybeUninit<BuddyLink>>();
-        let link = unsafe { BuddyLink::init(uninit, self.free_list) };
+        let uninit = base.with_addr(block).cast::<MaybeUninit<BlockLink>>();
+        let link = unsafe { BlockLink::init(uninit, self.free_list) };
         self.free_list = Some(link);
     }
 
@@ -320,7 +320,7 @@ impl<const ORDER: usize, const PGSIZE: usize, A: BackingAllocator>
 {
     pub fn region_layout(num_blocks: usize) -> Layout {
         assert!(ORDER > 0);
-        assert!(PGSIZE >= mem::size_of::<BuddyLink>() && PGSIZE.is_power_of_two());
+        assert!(PGSIZE >= mem::size_of::<BlockLink>() && PGSIZE.is_power_of_two());
         let order: u32 = ORDER.try_into().unwrap();
 
         let size = 2usize.pow(order - 1) * PGSIZE * num_blocks;
@@ -336,7 +336,7 @@ impl<const ORDER: usize, const PGSIZE: usize, A: BackingAllocator>
         }
 
         assert!(ORDER > 0);
-        assert!(PGSIZE >= mem::size_of::<BuddyLink>() && PGSIZE.is_power_of_two());
+        assert!(PGSIZE >= mem::size_of::<BlockLink>() && PGSIZE.is_power_of_two());
         let order: u32 = ORDER.try_into().unwrap();
 
         // Each level needs one buddy bit per pair of blocks.
@@ -566,7 +566,7 @@ impl<const ORDER: usize, const PGSIZE: usize> BuddyAllocatorParts<ORDER, PGSIZE>
         metadata: NonNull<u8>,
     ) -> BuddyAllocatorParts<ORDER, PGSIZE> {
         assert!(ORDER > 0);
-        assert!(PGSIZE >= mem::size_of::<BuddyLink>() && PGSIZE.is_power_of_two());
+        assert!(PGSIZE >= mem::size_of::<BlockLink>() && PGSIZE.is_power_of_two());
         let full_layout = BuddyAllocator::<ORDER, PGSIZE, Raw>::metadata_layout(num_blocks);
 
         // TODO: use MaybeUninit::uninit_array when not feature gated
@@ -645,7 +645,7 @@ impl<const ORDER: usize, const PGSIZE: usize> BuddyAllocatorParts<ORDER, PGSIZE>
 
             let link = unsafe {
                 // TODO: use NonZeroUsize::checked_add (this is usize::checked_add)
-                BuddyLink::init(
+                BlockLink::init(
                     base.map_addr(|b| {
                         let raw = b.get().checked_add(block_offset).unwrap();
                         NonZeroUsize::new(raw).unwrap()
