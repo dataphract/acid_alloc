@@ -4,14 +4,15 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = []
+default = ["sptr"]
 
 alloc = []
-allocator_api = []
-int_log = []
+
+# Enables nightly-only unstable Rust features.
+unstable = []
 
 [dependencies]
-sptr = { version = "0.2.3", optional = true }
+sptr = { version = "0.3.0", optional = true }
 
 [dev-dependencies]
 quickcheck = "1.0.3"

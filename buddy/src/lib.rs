@@ -3,10 +3,16 @@
 #![no_std]
 #![allow(unstable_name_collisions)]
 #![deny(unsafe_op_in_unsafe_fn)]
-#![feature(alloc_layout_extra)]
-#![cfg_attr(feature = "allocator_api", feature(allocator_api))]
-#![cfg_attr(feature = "int_log", feature(int_log))]
-#![cfg_attr(not(feature = "sptr"), feature(strict_provenance))]
+#![cfg_attr(feature = "unstable", feature(alloc_layout_extra))]
+#![cfg_attr(feature = "unstable", feature(allocator_api))]
+#![cfg_attr(feature = "unstable", feature(int_log))]
+#![cfg_attr(
+    all(feature = "unstable", not(feature = "sptr")),
+    feature(strict_provenance)
+)]
+
+#[cfg(not(any(feature = "sptr", feature = "unstable")))]
+compile_error!("Either the \"sptr\" or \"unstable\" feature must be enabled.");
 
 #[cfg(any(feature = "alloc", test))]
 extern crate alloc;
@@ -14,27 +20,30 @@ extern crate alloc;
 mod bitmap;
 mod polyfill;
 
-#[cfg(test)]
+#[cfg(all(any(feature = "sptr", feature = "unstable"), test))]
 mod tests;
 
+use core::{alloc::Layout, num::NonZeroUsize, ptr::NonNull};
+
+#[cfg(any(feature = "sptr", feature = "unstable"))]
 use core::{
-    alloc::Layout,
     cmp,
     mem::{self, MaybeUninit},
-    num::NonZeroUsize,
-    ptr::NonNull,
 };
 
-#[cfg(feature = "allocator_api")]
+#[cfg(feature = "unstable")]
 use core::alloc::{AllocError, Allocator};
 
-#[cfg(all(feature = "allocator_api", any(feature = "alloc", test)))]
+#[cfg(all(feature = "unstable", any(feature = "alloc", test)))]
 use alloc::alloc::Global;
 
 #[cfg(feature = "sptr")]
 use sptr::Strict;
 
-use crate::{bitmap::Bitmap, polyfill::*};
+use crate::bitmap::Bitmap;
+
+#[cfg(not(feature = "unstable"))]
+use crate::polyfill::*;
 
 fn round_up_pow2(x: usize) -> Option<usize> {
     match x {
@@ -60,6 +69,7 @@ struct BuddyLink {
     next: Option<NonZeroUsize>,
 }
 
+#[cfg(any(feature = "sptr", feature = "unstable"))]
 impl BuddyLink {
     /// Initializes a `BuddyLink` at the pointed-to location.
     ///
@@ -98,6 +108,7 @@ struct BuddyLevel {
     splits: Option<Bitmap>,
 }
 
+#[cfg(any(feature = "sptr", feature = "unstable"))]
 impl BuddyLevel {
     /// Retrieves the index of the block which starts `block_ofs` bytes from the
     /// base.
@@ -252,6 +263,7 @@ struct BasePtr {
     ptr: NonNull<u8>,
 }
 
+#[cfg(any(feature = "sptr", feature = "unstable"))]
 impl BasePtr {
     /// Calculates the offset from `self` to `block`.
     fn offset_to(self, block: NonZeroUsize) -> usize {
@@ -307,23 +319,23 @@ impl BackingAllocator for Raw {
     unsafe fn deallocate(&self, _: NonNull<u8>, _: Layout) {}
 }
 
-#[cfg(all(any(feature = "alloc", test), not(feature = "allocator_api")))]
+#[cfg(all(any(feature = "alloc", test), not(feature = "unstable")))]
 /// The global memory allocator.
 pub struct Global;
 
-#[cfg(all(any(feature = "alloc", test), not(feature = "allocator_api")))]
+#[cfg(all(any(feature = "alloc", test), not(feature = "unstable")))]
 impl Sealed for Global {}
 
-#[cfg(all(any(feature = "alloc", test), not(feature = "allocator_api")))]
+#[cfg(all(any(feature = "alloc", test), not(feature = "unstable")))]
 impl BackingAllocator for Global {
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
         unsafe { alloc::alloc::dealloc(ptr.as_ptr(), layout) };
     }
 }
 
-#[cfg(feature = "allocator_api")]
+#[cfg(feature = "unstable")]
 impl<A: Allocator> Sealed for A {}
-#[cfg(feature = "allocator_api")]
+#[cfg(feature = "unstable")]
 impl<A: Allocator> BackingAllocator for A {
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
         unsafe { Allocator::deallocate(self, ptr, layout) };
@@ -353,6 +365,7 @@ const fn sum_of_powers_of_2(max: u32) -> usize {
     2 * (2_usize.pow(max) - 1)
 }
 
+#[cfg(any(feature = "sptr", feature = "unstable"))]
 impl<const ORDER: usize, const PGSIZE: usize> BuddyAllocator<ORDER, PGSIZE, Raw> {
     /// Construct a new `BuddyAllocator` from raw pointers.
     ///
@@ -379,7 +392,11 @@ impl<const ORDER: usize, const PGSIZE: usize> BuddyAllocator<ORDER, PGSIZE, Raw>
     }
 }
 
-#[cfg(all(not(feature = "allocator_api"), any(feature = "alloc", test)))]
+#[cfg(all(
+    not(feature = "unstable"),
+    feature = "sptr",
+    any(feature = "alloc", test)
+))]
 impl<const ORDER: usize, const PGSIZE: usize> BuddyAllocator<ORDER, PGSIZE, Global> {
     pub fn new(num_blocks: usize) -> BuddyAllocator<ORDER, PGSIZE, Global> {
         let region_layout = Self::region_layout(num_blocks);
@@ -402,7 +419,7 @@ impl<const ORDER: usize, const PGSIZE: usize> BuddyAllocator<ORDER, PGSIZE, Glob
     }
 }
 
-#[cfg(all(feature = "allocator_api", any(feature = "alloc", test)))]
+#[cfg(all(feature = "unstable", any(feature = "alloc", test)))]
 impl<const ORDER: usize, const PGSIZE: usize> BuddyAllocator<ORDER, PGSIZE, Global> {
     pub fn new(num_blocks: usize) -> BuddyAllocator<ORDER, PGSIZE, Global> {
         BuddyAllocator::<ORDER, PGSIZE, Global>::new_in(Global, num_blocks)
@@ -410,7 +427,7 @@ impl<const ORDER: usize, const PGSIZE: usize> BuddyAllocator<ORDER, PGSIZE, Glob
     }
 }
 
-#[cfg(feature = "allocator_api")]
+#[cfg(feature = "unstable")]
 impl<const ORDER: usize, const PGSIZE: usize, A: Allocator> BuddyAllocator<ORDER, PGSIZE, A> {
     pub fn new_in(
         allocator: A,
@@ -443,6 +460,7 @@ impl<const ORDER: usize, const PGSIZE: usize, A: Allocator> BuddyAllocator<ORDER
     }
 }
 
+#[cfg(any(feature = "sptr", feature = "unstable"))]
 impl<const ORDER: usize, const PGSIZE: usize, A: BackingAllocator> Drop
     for BuddyAllocator<ORDER, PGSIZE, A>
 {
@@ -461,6 +479,7 @@ impl<const ORDER: usize, const PGSIZE: usize, A: BackingAllocator> Drop
     }
 }
 
+#[cfg(any(feature = "sptr", feature = "unstable"))]
 impl<const ORDER: usize, const PGSIZE: usize, A: BackingAllocator>
     BuddyAllocator<ORDER, PGSIZE, A>
 {
@@ -659,6 +678,7 @@ struct BuddyAllocatorParts<const ORDER: usize, const PGSIZE: usize> {
     levels: [BuddyLevel; ORDER],
 }
 
+#[cfg(any(feature = "sptr", feature = "unstable"))]
 impl<const ORDER: usize, const PGSIZE: usize> BuddyAllocatorParts<ORDER, PGSIZE> {
     fn with_backing_allocator<A: BackingAllocator>(
         self,
