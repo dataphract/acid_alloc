@@ -203,7 +203,7 @@ impl<const ORDER: usize, const PGSIZE: usize> BuddyAllocator<ORDER, PGSIZE, Raw>
     /// # Safety
     ///
     /// The caller must uphold the following invariants:
-    /// - `base` must be a pointer to a region that satisfies the [`Layout`]
+    /// - `region` must be a pointer to a region that satisfies the [`Layout`]
     ///   returned by [`Self::region_layout()`], and it must be valid for reads
     ///   and writes for the entire size indicated by that `Layout`.
     /// - `metadata` must be a pointer to a region that satisfies the [`Layout`]
@@ -212,12 +212,12 @@ impl<const ORDER: usize, const PGSIZE: usize> BuddyAllocator<ORDER, PGSIZE, Raw>
     ///
     /// [`Layout`]: core::alloc::Layout
     pub unsafe fn new_raw(
-        base: NonNull<u8>,
-        num_blocks: usize,
         metadata: NonNull<u8>,
+        region: NonNull<u8>,
+        num_blocks: usize,
     ) -> BuddyAllocator<ORDER, PGSIZE, Raw> {
         unsafe {
-            BuddyAllocatorParts::<ORDER, PGSIZE>::new(base, num_blocks, metadata)
+            BuddyAllocatorParts::<ORDER, PGSIZE>::new(metadata, region, num_blocks)
                 .with_backing_allocator(Raw)
         }
     }
@@ -250,7 +250,7 @@ impl<const ORDER: usize, const PGSIZE: usize> BuddyAllocator<ORDER, PGSIZE, Glob
                 })
             };
 
-            BuddyAllocatorParts::<ORDER, PGSIZE>::new(region_ptr, num_blocks, metadata_ptr)
+            BuddyAllocatorParts::<ORDER, PGSIZE>::new(metadata_ptr, region_ptr, num_blocks)
                 .with_backing_allocator(Global)
         }
     }
@@ -290,7 +290,7 @@ impl<const ORDER: usize, const PGSIZE: usize, A: Allocator> BuddyAllocator<ORDER
             let metadata_ptr = NonNull::new_unchecked(metadata.as_ptr() as *mut u8);
 
             Ok(
-                BuddyAllocatorParts::<ORDER, PGSIZE>::new(region_ptr, num_blocks, metadata_ptr)
+                BuddyAllocatorParts::<ORDER, PGSIZE>::new(metadata_ptr, region_ptr, num_blocks)
                     .with_backing_allocator(allocator),
             )
         }
@@ -561,9 +561,9 @@ impl<const ORDER: usize, const PGSIZE: usize> BuddyAllocatorParts<ORDER, PGSIZE>
     ///
     /// [`Layout`]: core::alloc::Layout
     pub unsafe fn new(
+        metadata: NonNull<u8>,
         base: NonNull<u8>,
         num_blocks: usize,
-        metadata: NonNull<u8>,
     ) -> BuddyAllocatorParts<ORDER, PGSIZE> {
         assert!(ORDER > 0);
         assert!(PGSIZE >= mem::size_of::<BlockLink>() && PGSIZE.is_power_of_two());
