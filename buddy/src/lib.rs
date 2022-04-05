@@ -150,6 +150,15 @@ impl BasePtr {
 ///
 /// [`Allocator`]: https://doc.rust-lang.org/stable/core/alloc/trait.Allocator.html
 pub trait BackingAllocator: Sealed {
+    /// Deallocates the memory referenced by `ptr`.
+    ///
+    /// # Safety
+    ///
+    /// * `ptr` must denote a block of memory [*currently allocated*] via this allocator, and
+    /// * `layout` must [*fit*] that block of memory.
+    ///
+    /// [*currently allocated*]: https://doc.rust-lang.org/nightly/alloc/alloc/trait.Allocator.html#currently-allocated-memory
+    /// [*fit*]: https://doc.rust-lang.org/nightly/alloc/alloc/trait.Allocator.html#memory-fitting
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout);
 }
 
