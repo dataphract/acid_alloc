@@ -38,9 +38,6 @@ use core::mem::{self, MaybeUninit};
 #[cfg(feature = "unstable")]
 use core::alloc::Allocator;
 
-#[cfg(all(feature = "unstable", any(feature = "alloc", test)))]
-use alloc::alloc::Global;
-
 #[cfg(feature = "sptr")]
 use sptr::Strict;
 

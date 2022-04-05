@@ -5,7 +5,13 @@ use std::prelude::rust_2021::*;
 
 use quickcheck::{Arbitrary, Gen, QuickCheck};
 
-use crate::{buddy::BuddyAllocator, Global};
+use crate::buddy::BuddyAllocator;
+
+#[cfg(all(any(feature = "alloc", test), not(feature = "unstable")))]
+use crate::Global;
+
+#[cfg(all(any(feature = "alloc", test), feature = "unstable"))]
+use alloc::alloc::Global;
 
 enum AllocatorOpTag {
     Allocate,
