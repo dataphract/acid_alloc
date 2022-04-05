@@ -66,8 +66,8 @@ fn allocations_are_mutually_exclusive() {
     const ORDER: usize = 7;
     const BLOCKS: usize = 16;
 
-    fn prop<const ORDER: usize, const PGSIZE: usize>(ops: Vec<AllocatorOp>) -> bool {
-        let mut alloc = BuddyAllocator::<ORDER, PGSIZE, Global>::new(BLOCKS);
+    fn prop<const PGSIZE: usize, const ORDER: usize>(ops: Vec<AllocatorOp>) -> bool {
+        let mut alloc = BuddyAllocator::<PGSIZE, ORDER, Global>::new(BLOCKS);
 
         let mut allocations = Vec::with_capacity(ops.len());
 
@@ -119,7 +119,7 @@ fn allocations_are_mutually_exclusive() {
     }
 
     let mut qc = QuickCheck::new();
-    qc.quickcheck(prop::<ORDER, PGSIZE> as fn(_) -> bool);
+    qc.quickcheck(prop::<PGSIZE, ORDER> as fn(_) -> bool);
 }
 
 #[test]
@@ -129,7 +129,7 @@ fn create_and_destroy() {
     const PGSIZE: usize = 8;
     const NUM_BLOCKS: usize = 8;
 
-    let allocator = BuddyAllocator::<ORDER, PGSIZE, Global>::new(NUM_BLOCKS);
+    let allocator = BuddyAllocator::<PGSIZE, ORDER, Global>::new(NUM_BLOCKS);
     drop(allocator);
 }
 
@@ -139,7 +139,7 @@ fn alloc_min_size() {
     const PGSIZE: usize = 8;
     const NUM_BLOCKS: usize = 8;
 
-    let mut allocator = BuddyAllocator::<ORDER, PGSIZE, Global>::new(NUM_BLOCKS);
+    let mut allocator = BuddyAllocator::<PGSIZE, ORDER, Global>::new(NUM_BLOCKS);
 
     unsafe {
         let a = allocator.allocate(1).unwrap();
@@ -156,7 +156,7 @@ fn alloc_write_and_free() {
     const PGSIZE: usize = 8;
     const NUM_BLOCKS: usize = 8;
 
-    let mut allocator = BuddyAllocator::<ORDER, PGSIZE, Global>::new(NUM_BLOCKS);
+    let mut allocator = BuddyAllocator::<PGSIZE, ORDER, Global>::new(NUM_BLOCKS);
 
     unsafe {
         let size = 64;
@@ -183,7 +183,7 @@ fn coalesce_one() {
     const PGSIZE: usize = 8;
     const NUM_BLOCKS: usize = 1;
 
-    let mut allocator = BuddyAllocator::<ORDER, PGSIZE, Global>::new(NUM_BLOCKS);
+    let mut allocator = BuddyAllocator::<PGSIZE, ORDER, Global>::new(NUM_BLOCKS);
 
     unsafe {
         // Allocate two minimum-size blocks to split the top block.
@@ -217,7 +217,7 @@ fn coalesce_many() {
     const PGSIZE: usize = 8;
     const NUM_BLOCKS: usize = 8;
 
-    let mut allocator = BuddyAllocator::<ORDER, PGSIZE, Global>::new(NUM_BLOCKS);
+    let mut allocator = BuddyAllocator::<PGSIZE, ORDER, Global>::new(NUM_BLOCKS);
 
     for o in (0..ORDER).rev() {
         let alloc_size = 2usize.pow((ORDER - o - 1) as u32) * PGSIZE;
