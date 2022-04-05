@@ -1,3 +1,5 @@
+//! A binary-buddy allocator.
+
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![feature(alloc_layout_extra)]
@@ -6,7 +8,13 @@
 #![feature(maybe_uninit_array_assume_init)]
 #![feature(strict_provenance)]
 
+#[cfg(any(feature = "alloc", test))]
+extern crate alloc;
+
 mod bitmap;
+
+#[cfg(test)]
+mod tests;
 
 use core::{
     alloc::Layout,
@@ -33,11 +41,12 @@ fn round_up_pow2(x: usize) -> Option<usize> {
 #[repr(C)]
 struct BuddyLink {
     // Rather than using a pointer, store only the address of the next link.
-    // This avoids violating stacked borrows; the link "points to" the next block,
-    // but by forgoing a pointer, it does not imply a borrow.
+    // This avoids accidentally violating stacked borrows; the link "points to"
+    // the next block, but by forgoing an actual pointer, it does not imply a
+    // borrow.
     //
-    // NOTE: Any pointer to a block must be acquired via the allocator base
-    // pointer, and NOT by casting this address directly!
+    // NOTE: Using this method, any actual pointer to a block must be acquired
+    // via the allocator base pointer, and NOT by casting this address directly!
     next: Option<NonZeroUsize>,
 }
 
@@ -61,15 +70,17 @@ impl BuddyLink {
     ) -> NonZeroUsize {
         assert_eq!(ptr.as_ptr().align_offset(mem::align_of::<BuddyLink>()), 0);
 
-        unsafe {
+        let addr = unsafe {
             let uninit_mut: &mut MaybeUninit<_> = ptr.as_mut();
-            uninit_mut.as_mut_ptr().write(BuddyLink { next });
-            NonZeroUsize::new(uninit_mut.as_mut_ptr().addr()).unwrap()
-        }
+            let ptr = uninit_mut.as_mut_ptr();
+            ptr.write(BuddyLink { next });
+            ptr.addr()
+        };
+
+        NonZeroUsize::new(addr).unwrap()
     }
 }
 
-/// Calculates the offset from `base` to `block`.
 struct BuddyLevel {
     block_size: usize,
     free_list: Option<NonZeroUsize>,
@@ -139,8 +150,7 @@ impl BuddyLevel {
 
         let mut cur = head;
         loop {
-            let mut cur_mut = unsafe { base.with_addr(cur).cast::<BuddyLink>().as_mut() };
-            let next = match cur_mut.next {
+            let next = match unsafe { base.link_mut(cur).next } {
                 Some(n) => n,
 
                 // Block not found in free list.
@@ -151,15 +161,16 @@ impl BuddyLevel {
             cur = next;
             assert!(prev != cur);
 
-            cur_mut = unsafe { base.with_addr(cur).cast::<BuddyLink>().as_mut() };
-
             if cur == block {
                 unsafe {
                     // SAFETY: `prev` and `cur` must not be overlapping (which they shouldn't be).
-                    let prev_mut = base.with_addr(prev).cast::<BuddyLink>().as_mut();
+                    let prev_mut = base.link_mut(prev);
+                    let cur_mut = base.link_mut(cur);
 
                     prev_mut.next = cur_mut.next.take();
                 }
+
+                return Some(block);
             }
         }
 
@@ -262,6 +273,11 @@ impl BasePtr {
     }
 }
 
+/// A binary-buddy allocator.
+///
+/// This takes two const parameters:
+/// - `PGSIZE` is the size of the smallest allocations the allocator can make.
+/// - `ORDER` is the number of levels in the allocator.
 pub struct BuddyAllocator<const ORDER: usize, const PGSIZE: usize> {
     /// Pointer to the region managed by this allocator.
     base: BasePtr,
@@ -282,7 +298,7 @@ const fn sum_of_powers_of_2(max: u32) -> usize {
 impl<const ORDER: usize, const PGSIZE: usize> BuddyAllocator<ORDER, PGSIZE> {
     pub fn region_layout(num_blocks: usize) -> Layout {
         assert!(ORDER > 0);
-        assert!(PGSIZE >= mem::size_of::<BuddyLink>() && PGSIZE.count_ones() == 1);
+        assert!(PGSIZE >= mem::size_of::<BuddyLink>() && PGSIZE.is_power_of_two());
         let order: u32 = ORDER.try_into().unwrap();
 
         let size = 2usize.pow(order - 1) * PGSIZE * num_blocks;
@@ -294,7 +310,7 @@ impl<const ORDER: usize, const PGSIZE: usize> BuddyAllocator<ORDER, PGSIZE> {
     /// Returns the layout requirements for the metadata region.
     pub fn metadata_layout(num_blocks: usize) -> Layout {
         assert!(ORDER > 0);
-        assert!(PGSIZE >= mem::size_of::<BuddyLink>() && PGSIZE.count_ones() == 1);
+        assert!(PGSIZE >= mem::size_of::<BuddyLink>() && PGSIZE.is_power_of_two());
         let order: u32 = ORDER.try_into().unwrap();
 
         // Each level needs one buddy bit per pair of blocks.
@@ -338,11 +354,26 @@ impl<const ORDER: usize, const PGSIZE: usize> BuddyAllocator<ORDER, PGSIZE> {
         full_layout
     }
 
+    /// Construct a new `BuddyAllocator` from raw pointers.
+    ///
+    /// # Safety
+    ///
+    /// The caller must uphold the following invariants:
+    /// - `base` must be a pointer to a region that satisfies the [`Layout`]
+    ///   returned by [`Self::region_layout()`], and it must be valid for reads
+    ///   and writes for the entire size indicated by that `Layout`.
+    /// - `metadata` must be a pointer to a region that satisfies the [`Layout`]
+    ///   returned by [`Self::metadata_layout()`], and it must be valid for
+    ///   reads and writes for the entire size indicated by that `Layout`.
+    ///
+    /// [`Layout`]: core::alloc::Layout
     pub unsafe fn new(
         base: NonNull<u8>,
         num_blocks: usize,
         metadata: *mut u8,
     ) -> BuddyAllocator<ORDER, PGSIZE> {
+        assert!(ORDER > 0);
+        assert!(PGSIZE >= mem::size_of::<BuddyLink>() && PGSIZE.is_power_of_two());
         let full_layout = Self::metadata_layout(num_blocks);
 
         // TODO: use MaybeUninit::uninit_array when not feature gated
@@ -536,6 +567,37 @@ impl<const ORDER: usize, const PGSIZE: usize> BuddyAllocator<ORDER, PGSIZE> {
         assert!(block.is_none(), "top level coalesced a block");
     }
 
+    #[cfg(any(feature = "alloc", test))]
+    fn new_with_global(num_blocks: usize) -> BuddyAllocator<ORDER, PGSIZE> {
+        let region_layout = BuddyAllocator::<ORDER, PGSIZE>::region_layout(num_blocks);
+        let metadata_layout = BuddyAllocator::<ORDER, PGSIZE>::metadata_layout(num_blocks);
+
+        unsafe {
+            let region_ptr = {
+                let raw = alloc::alloc::alloc(region_layout);
+                NonNull::new(raw).unwrap()
+            };
+
+            let metadata_ptr = alloc::alloc::alloc(metadata_layout);
+
+            BuddyAllocator::<ORDER, PGSIZE>::new(region_ptr, num_blocks, metadata_ptr)
+        }
+    }
+
+    #[cfg(any(feature = "alloc", test))]
+    unsafe fn free_with_global(self) {
+        let num_blocks = self.num_blocks;
+
+        let region_layout = BuddyAllocator::<ORDER, PGSIZE>::region_layout(num_blocks);
+        let metadata_layout = BuddyAllocator::<ORDER, PGSIZE>::metadata_layout(num_blocks);
+
+        unsafe {
+            let (region, metadata) = self.into_raw_parts();
+            alloc::alloc::dealloc(region.as_ptr(), region_layout);
+            alloc::alloc::dealloc(metadata, metadata_layout);
+        }
+    }
+
     /// Decomposes the allocator into its raw components.
     ///
     /// The returned tuple contains the region pointer and the metadata pointer.
@@ -551,164 +613,5 @@ impl<const ORDER: usize, const PGSIZE: usize> BuddyAllocator<ORDER, PGSIZE> {
         let BuddyAllocator { base, metadata, .. } = self;
 
         (base.ptr, metadata)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    extern crate std;
-
-    use core::slice;
-    use std::prelude::rust_2021::*;
-
-    use super::*;
-
-    fn new_with_global<const ORDER: usize, const PGSIZE: usize>(
-        num_blocks: usize,
-    ) -> BuddyAllocator<ORDER, PGSIZE> {
-        let region_layout = BuddyAllocator::<ORDER, PGSIZE>::region_layout(num_blocks);
-        let metadata_layout = BuddyAllocator::<ORDER, PGSIZE>::metadata_layout(num_blocks);
-
-        unsafe {
-            let region_ptr = {
-                let raw = std::alloc::alloc(region_layout);
-                NonNull::new(raw).unwrap()
-            };
-
-            let metadata_ptr = std::alloc::alloc(metadata_layout);
-
-            BuddyAllocator::<ORDER, PGSIZE>::new(region_ptr, num_blocks, metadata_ptr)
-        }
-    }
-
-    unsafe fn free_with_global<const ORDER: usize, const PGSIZE: usize>(
-        allocator: BuddyAllocator<ORDER, PGSIZE>,
-    ) {
-        let num_blocks = allocator.num_blocks;
-
-        let region_layout = BuddyAllocator::<ORDER, PGSIZE>::region_layout(num_blocks);
-        let metadata_layout = BuddyAllocator::<ORDER, PGSIZE>::metadata_layout(num_blocks);
-
-        unsafe {
-            let (region, metadata) = allocator.into_raw_parts();
-            std::alloc::dealloc(region.as_ptr(), region_layout);
-            std::alloc::dealloc(metadata, metadata_layout);
-        }
-    }
-
-    #[test]
-    fn create_and_destroy() {
-        // These parameters give a maximum block size of 1KiB and a total size of 8KiB.
-        const ORDER: usize = 8;
-        const PGSIZE: usize = 8;
-        const NUM_BLOCKS: usize = 8;
-
-        let allocator = new_with_global::<ORDER, PGSIZE>(NUM_BLOCKS);
-        unsafe { free_with_global(allocator) };
-    }
-
-    #[test]
-    fn alloc_write_and_free() {
-        const ORDER: usize = 8;
-        const PGSIZE: usize = 8;
-        const NUM_BLOCKS: usize = 8;
-
-        let mut allocator = new_with_global::<ORDER, PGSIZE>(NUM_BLOCKS);
-
-        unsafe {
-            let size = 64;
-            let ptr: NonNull<u8> = allocator.allocate(size).unwrap();
-
-            {
-                // Do this in a separate scope so that the slice no longer
-                // exists when ptr is freed
-                let buf: &mut [u8] = slice::from_raw_parts_mut(ptr.as_ptr(), size);
-                for (i, byte) in buf.iter_mut().enumerate() {
-                    *byte = i as u8;
-                }
-            }
-
-            allocator.free(ptr);
-        }
-
-        unsafe { free_with_global(allocator) };
-    }
-
-    #[test]
-    fn coalesce_one() {
-        // This configuration gives a 2-level buddy allocator with one
-        // splittable top-level block.
-        const ORDER: usize = 2;
-        const PGSIZE: usize = 8;
-        const NUM_BLOCKS: usize = 1;
-
-        let mut allocator = new_with_global::<ORDER, PGSIZE>(NUM_BLOCKS);
-
-        unsafe {
-            // Allocate two minimum-size blocks to split the top block.
-            let a = allocator.allocate(PGSIZE).unwrap();
-            let b = allocator.allocate(PGSIZE).unwrap();
-
-            // Free both blocks, coalescing them.
-            allocator.free(a);
-            allocator.free(b);
-
-            // Allocate the entire region to ensure coalescing worked.
-            let c = allocator.allocate(2 * PGSIZE).unwrap();
-            allocator.free(c);
-
-            // Same as above.
-            let a = allocator.allocate(PGSIZE).unwrap();
-            let b = allocator.allocate(PGSIZE).unwrap();
-
-            // Free both blocks, this time in reverse order.
-            allocator.free(a);
-            allocator.free(b);
-
-            let c = allocator.allocate(2 * PGSIZE).unwrap();
-            allocator.free(c);
-        }
-
-        unsafe { free_with_global(allocator) };
-    }
-
-    #[test]
-    fn coalesce_many() {
-        const ORDER: usize = 4;
-        const PGSIZE: usize = 8;
-        const NUM_BLOCKS: usize = 8;
-
-        let mut allocator = new_with_global::<ORDER, PGSIZE>(NUM_BLOCKS);
-
-        for o in (0..ORDER).rev() {
-            let alloc_size = 2usize.pow((ORDER - o - 1) as u32) * PGSIZE;
-            let num_allocs = 2usize.pow(o as u32) * NUM_BLOCKS;
-
-            let mut allocs = Vec::with_capacity(num_allocs);
-            for i in 0..num_allocs {
-                let ptr = unsafe { allocator.allocate(alloc_size).unwrap() };
-                std::println!("alloced {i}");
-
-                {
-                    // Do this in a separate scope so that the slice no longer
-                    // exists when ptr is freed
-                    let buf: &mut [u8] =
-                        unsafe { slice::from_raw_parts_mut(ptr.as_ptr(), alloc_size) };
-                    for (i, byte) in buf.iter_mut().enumerate() {
-                        *byte = (i % 256) as u8;
-                    }
-                }
-
-                allocs.push(ptr);
-            }
-
-            for alloc in allocs {
-                unsafe {
-                    allocator.free(alloc);
-                }
-            }
-        }
-
-        unsafe { free_with_global(allocator) };
     }
 }
