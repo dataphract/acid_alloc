@@ -1,17 +1,18 @@
 //! A binary-buddy allocator.
 
 #![no_std]
+#![allow(unstable_name_collisions)]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![feature(alloc_layout_extra)]
-#![feature(int_log)]
-#![feature(maybe_uninit_uninit_array)]
-#![feature(maybe_uninit_array_assume_init)]
-#![feature(strict_provenance)]
+#![cfg_attr(feature = "allocator_api", feature(allocator_api))]
+#![cfg_attr(feature = "int_log", feature(int_log))]
+#![cfg_attr(not(feature = "sptr"), feature(strict_provenance))]
 
 #[cfg(any(feature = "alloc", test))]
 extern crate alloc;
 
 mod bitmap;
+mod polyfill;
 
 #[cfg(test)]
 mod tests;
@@ -24,7 +25,16 @@ use core::{
     ptr::NonNull,
 };
 
-use crate::bitmap::Bitmap;
+#[cfg(feature = "allocator_api")]
+use core::alloc::{AllocError, Allocator};
+
+#[cfg(all(feature = "allocator_api", any(feature = "alloc", test)))]
+use alloc::alloc::Global;
+
+#[cfg(feature = "sptr")]
+use sptr::Strict;
+
+use crate::{bitmap::Bitmap, polyfill::*};
 
 fn round_up_pow2(x: usize) -> Option<usize> {
     match x {
@@ -273,29 +283,187 @@ impl BasePtr {
     }
 }
 
+/// Types which can be used to provide memory which backs an allocator.
+///
+/// This is a supertrait of [`Allocator`], and is implemented by the following types:
+/// - The `Raw` marker type indicates that an allocator is not backed by another
+///   allocator. This is the case when constructing the allocator from raw
+///   pointers. Memory used by this allocator can be reclaimed using
+///   `.into_raw_parts()`.
+/// - The `Global` marker type indicates that an allocator is backed by the
+///   global allocator. The allocator will free its memory on drop.
+/// - Any type `A` which implements [`Allocator`] indicates that an allocator is
+///   backed by an instance of `A`. The allocator will free its memory on drop.
+///
+/// [`Allocator`]: https://doc.rust-lang.org/stable/core/alloc/trait.Allocator.html
+pub trait BackingAllocator: Sealed {
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout);
+}
+
+/// A marker type indicating that an allocator is backed by raw pointers.
+pub struct Raw;
+impl Sealed for Raw {}
+impl BackingAllocator for Raw {
+    unsafe fn deallocate(&self, _: NonNull<u8>, _: Layout) {}
+}
+
+#[cfg(all(any(feature = "alloc", test), not(feature = "allocator_api")))]
+/// The global memory allocator.
+pub struct Global;
+
+#[cfg(all(any(feature = "alloc", test), not(feature = "allocator_api")))]
+impl Sealed for Global {}
+
+#[cfg(all(any(feature = "alloc", test), not(feature = "allocator_api")))]
+impl BackingAllocator for Global {
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+        unsafe { alloc::alloc::dealloc(ptr.as_ptr(), layout) };
+    }
+}
+
+#[cfg(feature = "allocator_api")]
+impl<A: Allocator> Sealed for A {}
+#[cfg(feature = "allocator_api")]
+impl<A: Allocator> BackingAllocator for A {
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+        unsafe { Allocator::deallocate(self, ptr, layout) };
+    }
+}
+
 /// A binary-buddy allocator.
 ///
 /// This takes two const parameters:
 /// - `PGSIZE` is the size of the smallest allocations the allocator can make.
 /// - `ORDER` is the number of levels in the allocator.
-pub struct BuddyAllocator<const ORDER: usize, const PGSIZE: usize> {
+pub struct BuddyAllocator<const ORDER: usize, const PGSIZE: usize, A: BackingAllocator> {
     /// Pointer to the region managed by this allocator.
     base: BasePtr,
     /// Pointer to the region that backs the bitmaps.
     ///
     /// This must not be used while the allocator exists; it is stored solely so
     /// that it may be returned in `into_raw_parts()`.
-    metadata: *mut u8,
+    metadata: NonNull<u8>,
     /// The number of zero-order blocks managed by this allocator.
     num_blocks: usize,
     levels: [BuddyLevel; ORDER],
+    backing_allocator: A,
 }
 
 const fn sum_of_powers_of_2(max: u32) -> usize {
     2 * (2_usize.pow(max) - 1)
 }
 
-impl<const ORDER: usize, const PGSIZE: usize> BuddyAllocator<ORDER, PGSIZE> {
+impl<const ORDER: usize, const PGSIZE: usize> BuddyAllocator<ORDER, PGSIZE, Raw> {
+    /// Construct a new `BuddyAllocator` from raw pointers.
+    ///
+    /// # Safety
+    ///
+    /// The caller must uphold the following invariants:
+    /// - `base` must be a pointer to a region that satisfies the [`Layout`]
+    ///   returned by [`Self::region_layout()`], and it must be valid for reads
+    ///   and writes for the entire size indicated by that `Layout`.
+    /// - `metadata` must be a pointer to a region that satisfies the [`Layout`]
+    ///   returned by [`Self::metadata_layout()`], and it must be valid for
+    ///   reads and writes for the entire size indicated by that `Layout`.
+    ///
+    /// [`Layout`]: core::alloc::Layout
+    pub unsafe fn new_raw(
+        base: NonNull<u8>,
+        num_blocks: usize,
+        metadata: NonNull<u8>,
+    ) -> BuddyAllocator<ORDER, PGSIZE, Raw> {
+        unsafe {
+            BuddyAllocatorParts::<ORDER, PGSIZE>::new(base, num_blocks, metadata)
+                .with_backing_allocator(Raw)
+        }
+    }
+}
+
+#[cfg(all(not(feature = "allocator_api"), any(feature = "alloc", test)))]
+impl<const ORDER: usize, const PGSIZE: usize> BuddyAllocator<ORDER, PGSIZE, Global> {
+    pub fn new(num_blocks: usize) -> BuddyAllocator<ORDER, PGSIZE, Global> {
+        let region_layout = Self::region_layout(num_blocks);
+        let metadata_layout = Self::metadata_layout(num_blocks);
+
+        unsafe {
+            let region_ptr = {
+                let raw = alloc::alloc::alloc(region_layout);
+                NonNull::new(raw).unwrap()
+            };
+
+            let metadata_ptr = {
+                let raw = alloc::alloc::alloc(metadata_layout);
+                NonNull::new(raw).unwrap()
+            };
+
+            BuddyAllocatorParts::<ORDER, PGSIZE>::new(region_ptr, num_blocks, metadata_ptr)
+                .with_backing_allocator(Global)
+        }
+    }
+}
+
+#[cfg(all(feature = "allocator_api", any(feature = "alloc", test)))]
+impl<const ORDER: usize, const PGSIZE: usize> BuddyAllocator<ORDER, PGSIZE, Global> {
+    pub fn new(num_blocks: usize) -> BuddyAllocator<ORDER, PGSIZE, Global> {
+        BuddyAllocator::<ORDER, PGSIZE, Global>::new_in(Global, num_blocks)
+            .expect("global allocation failed")
+    }
+}
+
+#[cfg(feature = "allocator_api")]
+impl<const ORDER: usize, const PGSIZE: usize, A: Allocator> BuddyAllocator<ORDER, PGSIZE, A> {
+    pub fn new_in(
+        allocator: A,
+        num_blocks: usize,
+    ) -> Result<BuddyAllocator<ORDER, PGSIZE, A>, AllocError> {
+        let region_layout = Self::region_layout(num_blocks);
+        let metadata_layout = Self::metadata_layout(num_blocks);
+
+        let region = allocator.allocate(region_layout)?;
+        let metadata = match allocator.allocate(metadata_layout) {
+            Ok(m) => m,
+            Err(e) => unsafe {
+                // SAFETY: region was received as NonNull via Allocator::allocate
+                let region_ptr = NonNull::new_unchecked(region.as_ptr() as *mut u8);
+                allocator.deallocate(region_ptr, region_layout);
+                return Err(e);
+            },
+        };
+
+        unsafe {
+            // SAFETY: both pointers were received as NonNull via Allocator::allocate
+            let region_ptr = NonNull::new_unchecked(region.as_ptr() as *mut u8);
+            let metadata_ptr = NonNull::new_unchecked(metadata.as_ptr() as *mut u8);
+
+            Ok(
+                BuddyAllocatorParts::<ORDER, PGSIZE>::new(region_ptr, num_blocks, metadata_ptr)
+                    .with_backing_allocator(allocator),
+            )
+        }
+    }
+}
+
+impl<const ORDER: usize, const PGSIZE: usize, A: BackingAllocator> Drop
+    for BuddyAllocator<ORDER, PGSIZE, A>
+{
+    fn drop(&mut self) {
+        let region = self.base.ptr;
+        let metadata = self.metadata;
+        let num_blocks = self.num_blocks;
+
+        let region_layout = Self::region_layout(num_blocks);
+        let metadata_layout = Self::metadata_layout(num_blocks);
+
+        unsafe {
+            self.backing_allocator.deallocate(region, region_layout);
+            self.backing_allocator.deallocate(metadata, metadata_layout);
+        }
+    }
+}
+
+impl<const ORDER: usize, const PGSIZE: usize, A: BackingAllocator>
+    BuddyAllocator<ORDER, PGSIZE, A>
+{
     pub fn region_layout(num_blocks: usize) -> Layout {
         assert!(ORDER > 0);
         assert!(PGSIZE >= mem::size_of::<BuddyLink>() && PGSIZE.is_power_of_two());
@@ -352,112 +520,6 @@ impl<const ORDER: usize, const PGSIZE: usize> BuddyAllocator<ORDER, PGSIZE> {
         };
 
         full_layout
-    }
-
-    /// Construct a new `BuddyAllocator` from raw pointers.
-    ///
-    /// # Safety
-    ///
-    /// The caller must uphold the following invariants:
-    /// - `base` must be a pointer to a region that satisfies the [`Layout`]
-    ///   returned by [`Self::region_layout()`], and it must be valid for reads
-    ///   and writes for the entire size indicated by that `Layout`.
-    /// - `metadata` must be a pointer to a region that satisfies the [`Layout`]
-    ///   returned by [`Self::metadata_layout()`], and it must be valid for
-    ///   reads and writes for the entire size indicated by that `Layout`.
-    ///
-    /// [`Layout`]: core::alloc::Layout
-    pub unsafe fn new(
-        base: NonNull<u8>,
-        num_blocks: usize,
-        metadata: *mut u8,
-    ) -> BuddyAllocator<ORDER, PGSIZE> {
-        assert!(ORDER > 0);
-        assert!(PGSIZE >= mem::size_of::<BuddyLink>() && PGSIZE.is_power_of_two());
-        let full_layout = Self::metadata_layout(num_blocks);
-
-        // TODO: use MaybeUninit::uninit_array when not feature gated
-        let mut levels: [MaybeUninit<BuddyLevel>; ORDER] = MaybeUninit::uninit_array();
-
-        let mut meta_curs = metadata;
-
-        for (li, level) in levels.iter_mut().enumerate() {
-            let block_size = 2_usize.pow((ORDER - li) as u32 - 1) * PGSIZE;
-            let block_factor = 2_usize.pow(li as u32);
-            let num_blocks = block_factor * num_blocks;
-            let num_pairs = num_blocks + 1 / 2;
-
-            let buddy_size = Bitmap::map_layout(num_pairs).size();
-            let buddy_bitmap = unsafe { Bitmap::new(num_pairs, meta_curs as *mut u64) };
-
-            meta_curs = unsafe {
-                meta_curs.offset(
-                    buddy_size
-                        .try_into()
-                        .expect("buddy bitmap layout size overflows isize"),
-                )
-            };
-
-            let split_bitmap = if li < ORDER - 1 {
-                let split_size = Bitmap::map_layout(num_blocks).size();
-                let split_bitmap = unsafe { Bitmap::new(num_blocks, meta_curs as *mut u64) };
-
-                meta_curs = unsafe {
-                    meta_curs.offset(
-                        split_size
-                            .try_into()
-                            .expect("split bitmap layout size overflows isize"),
-                    )
-                };
-
-                Some(split_bitmap)
-            } else {
-                None
-            };
-
-            unsafe {
-                level.as_mut_ptr().write(BuddyLevel {
-                    block_size,
-                    free_list: None,
-                    buddies: buddy_bitmap,
-                    splits: split_bitmap,
-                });
-            }
-        }
-
-        assert!(
-            unsafe { meta_curs.offset_from(metadata) } < full_layout.size().try_into().unwrap()
-        );
-
-        let mut levels = unsafe { MaybeUninit::array_assume_init(levels) };
-
-        // Initialize the top-level free list by emplacing links in each block.
-        let mut next_link = None;
-        for block_idx in (0..num_blocks).rev() {
-            let block_offset = block_idx * levels[0].block_size;
-
-            let link = unsafe {
-                // TODO: use NonZeroUsize::checked_add (this is usize::checked_add)
-                BuddyLink::init(
-                    base.map_addr(|b| {
-                        let raw = b.get().checked_add(block_offset).unwrap();
-                        NonZeroUsize::new(raw).unwrap()
-                    })
-                    .cast(),
-                    next_link,
-                )
-            };
-            next_link = Some(link);
-        }
-
-        levels[0].free_list = next_link;
-
-        BuddyAllocator {
-            base: BasePtr { ptr: base },
-            metadata,
-            num_blocks,
-            levels,
-        }
     }
 
     fn alloc_level(&self, size: usize) -> Option<usize> {
@@ -567,37 +629,6 @@ impl<const ORDER: usize, const PGSIZE: usize> BuddyAllocator<ORDER, PGSIZE> {
         assert!(block.is_none(), "top level coalesced a block");
     }
 
-    #[cfg(any(feature = "alloc", test))]
-    fn new_with_global(num_blocks: usize) -> BuddyAllocator<ORDER, PGSIZE> {
-        let region_layout = BuddyAllocator::<ORDER, PGSIZE>::region_layout(num_blocks);
-        let metadata_layout = BuddyAllocator::<ORDER, PGSIZE>::metadata_layout(num_blocks);
-
-        unsafe {
-            let region_ptr = {
-                let raw = alloc::alloc::alloc(region_layout);
-                NonNull::new(raw).unwrap()
-            };
-
-            let metadata_ptr = alloc::alloc::alloc(metadata_layout);
-
-            BuddyAllocator::<ORDER, PGSIZE>::new(region_ptr, num_blocks, metadata_ptr)
-        }
-    }
-
-    #[cfg(any(feature = "alloc", test))]
-    unsafe fn free_with_global(self) {
-        let num_blocks = self.num_blocks;
-
-        let region_layout = BuddyAllocator::<ORDER, PGSIZE>::region_layout(num_blocks);
-        let metadata_layout = BuddyAllocator::<ORDER, PGSIZE>::metadata_layout(num_blocks);
-
-        unsafe {
-            let (region, metadata) = self.into_raw_parts();
-            alloc::alloc::dealloc(region.as_ptr(), region_layout);
-            alloc::alloc::dealloc(metadata, metadata_layout);
-        }
-    }
-
     /// Decomposes the allocator into its raw components.
     ///
     /// The returned tuple contains the region pointer and the metadata pointer.
@@ -609,9 +640,169 @@ impl<const ORDER: usize, const PGSIZE: usize> BuddyAllocator<ORDER, PGSIZE> {
     /// was used to construct the allocator. As such, all allocations made from
     /// this allocator should be either freed or forgotten before calling this
     /// method.
-    pub unsafe fn into_raw_parts(self) -> (NonNull<u8>, *mut u8) {
+    pub unsafe fn into_raw_parts(self) -> (NonNull<u8>, NonNull<u8>) {
         let BuddyAllocator { base, metadata, .. } = self;
 
         (base.ptr, metadata)
     }
 }
+
+/// Like a `BuddyAllocator`, but without a `Drop` impl or an associated
+/// allocator.
+///
+/// This assists in tacking on the allocator type parameter because this struct can be
+/// moved out of, while `BuddyAllocator` itself cannot.
+struct BuddyAllocatorParts<const ORDER: usize, const PGSIZE: usize> {
+    base: BasePtr,
+    metadata: NonNull<u8>,
+    num_blocks: usize,
+    levels: [BuddyLevel; ORDER],
+}
+
+impl<const ORDER: usize, const PGSIZE: usize> BuddyAllocatorParts<ORDER, PGSIZE> {
+    fn with_backing_allocator<A: BackingAllocator>(
+        self,
+        backing_allocator: A,
+    ) -> BuddyAllocator<ORDER, PGSIZE, A> {
+        let BuddyAllocatorParts {
+            base,
+            metadata,
+            num_blocks,
+            levels,
+        } = self;
+
+        BuddyAllocator {
+            base,
+            metadata,
+            num_blocks,
+            levels,
+            backing_allocator,
+        }
+    }
+
+    /// Construct a new `BuddyAllocatorParts` from raw pointers.
+    ///
+    /// # Safety
+    ///
+    /// The caller must uphold the following invariants:
+    /// - `base` must be a pointer to a region that satisfies the [`Layout`]
+    ///   returned by [`Self::region_layout()`], and it must be valid for reads
+    ///   and writes for the entire size indicated by that `Layout`.
+    /// - `metadata` must be a pointer to a region that satisfies the [`Layout`]
+    ///   returned by [`Self::metadata_layout()`], and it must be valid for
+    ///   reads and writes for the entire size indicated by that `Layout`.
+    ///
+    /// [`Layout`]: core::alloc::Layout
+    pub unsafe fn new(
+        base: NonNull<u8>,
+        num_blocks: usize,
+        metadata: NonNull<u8>,
+    ) -> BuddyAllocatorParts<ORDER, PGSIZE> {
+        assert!(ORDER > 0);
+        assert!(PGSIZE >= mem::size_of::<BuddyLink>() && PGSIZE.is_power_of_two());
+        let full_layout = BuddyAllocator::<ORDER, PGSIZE, Raw>::metadata_layout(num_blocks);
+
+        // TODO: use MaybeUninit::uninit_array when not feature gated
+        let mut levels: [MaybeUninit<BuddyLevel>; ORDER] = unsafe {
+            // SAFETY: An uninitialized `[MaybeUninit<_>; _]` is valid.
+            MaybeUninit::<[MaybeUninit<BuddyLevel>; ORDER]>::uninit().assume_init()
+        };
+
+        let mut meta_curs = metadata.as_ptr();
+
+        for (li, level) in levels.iter_mut().enumerate() {
+            let block_size = 2_usize.pow((ORDER - li) as u32 - 1) * PGSIZE;
+            let block_factor = 2_usize.pow(li as u32);
+            let num_blocks = block_factor * num_blocks;
+            let num_pairs = num_blocks + 1 / 2;
+
+            let buddy_size = Bitmap::map_layout(num_pairs).size();
+            let buddy_bitmap = unsafe { Bitmap::new(num_pairs, meta_curs as *mut u64) };
+
+            meta_curs = unsafe {
+                meta_curs.offset(
+                    buddy_size
+                        .try_into()
+                        .expect("buddy bitmap layout size overflows isize"),
+                )
+            };
+
+            let split_bitmap = if li < ORDER - 1 {
+                let split_size = Bitmap::map_layout(num_blocks).size();
+                let split_bitmap = unsafe { Bitmap::new(num_blocks, meta_curs as *mut u64) };
+
+                meta_curs = unsafe {
+                    meta_curs.offset(
+                        split_size
+                            .try_into()
+                            .expect("split bitmap layout size overflows isize"),
+                    )
+                };
+
+                Some(split_bitmap)
+            } else {
+                None
+            };
+
+            unsafe {
+                level.as_mut_ptr().write(BuddyLevel {
+                    block_size,
+                    free_list: None,
+                    buddies: buddy_bitmap,
+                    splits: split_bitmap,
+                });
+            }
+        }
+
+        assert!(
+            unsafe { meta_curs.offset_from(metadata.as_ptr()) }
+                < full_layout.size().try_into().unwrap()
+        );
+
+        let mut levels = unsafe {
+            // TODO: This is the stdlib's implementation of
+            // MaybeUninit::array_assume_init(). When that's stable, use it
+            // instead.
+            //
+            // SAFETY:
+            // - `levels` is fully initialized.
+            // - `MaybeUninit<T>` and `T` have the same layout.
+            // - `MaybeUninit<T>` won't drop `T`, so no double-frees.
+            (&levels as *const _ as *const [BuddyLevel; ORDER]).read()
+        };
+
+        // Initialize the top-level free list by emplacing links in each block.
+        let mut next_link = None;
+        for block_idx in (0..num_blocks).rev() {
+            let block_offset = block_idx * levels[0].block_size;
+
+            let link = unsafe {
+                // TODO: use NonZeroUsize::checked_add (this is usize::checked_add)
+                BuddyLink::init(
+                    base.map_addr(|b| {
+                        let raw = b.get().checked_add(block_offset).unwrap();
+                        NonZeroUsize::new(raw).unwrap()
+                    })
+                    .cast(),
+                    next_link,
+                )
+            };
+            next_link = Some(link);
+        }
+
+        levels[0].free_list = next_link;
+
+        BuddyAllocatorParts {
+            base: BasePtr { ptr: base },
+            metadata,
+            num_blocks,
+            levels,
+        }
+    }
+}
+
+#[doc(hidden)]
+mod private {
+    pub trait Sealed {}
+}
+use private::Sealed;

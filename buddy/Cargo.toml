@@ -5,7 +5,13 @@ edition = "2021"
 
 [features]
 default = []
+
 alloc = []
+allocator_api = []
+int_log = []
+
+[dependencies]
+sptr = { version = "0.2.3", optional = true }
 
 [dev-dependencies]
 quickcheck = "1.0.3"

@@ -5,7 +5,7 @@ use std::prelude::rust_2021::*;
 
 use quickcheck::{Arbitrary, Gen, QuickCheck};
 
-use crate::BuddyAllocator;
+use crate::{BuddyAllocator, Global};
 
 enum AllocatorOpTag {
     Allocate,
@@ -61,7 +61,7 @@ fn allocations_are_mutually_exclusive() {
     const BLOCKS: usize = 16;
 
     fn prop<const ORDER: usize, const PGSIZE: usize>(ops: Vec<AllocatorOp>) -> bool {
-        let mut alloc = BuddyAllocator::<ORDER, PGSIZE>::new_with_global(BLOCKS);
+        let mut alloc = BuddyAllocator::<ORDER, PGSIZE, Global>::new(BLOCKS);
 
         let mut allocations = Vec::with_capacity(ops.len());
 
@@ -109,8 +109,6 @@ fn allocations_are_mutually_exclusive() {
             }
         }
 
-        unsafe { alloc.free_with_global() };
-
         true
     }
 
@@ -125,8 +123,8 @@ fn create_and_destroy() {
     const PGSIZE: usize = 8;
     const NUM_BLOCKS: usize = 8;
 
-    let allocator = BuddyAllocator::<ORDER, PGSIZE>::new_with_global(NUM_BLOCKS);
-    unsafe { allocator.free_with_global() };
+    let allocator = BuddyAllocator::<ORDER, PGSIZE, Global>::new(NUM_BLOCKS);
+    drop(allocator);
 }
 
 #[test]
@@ -135,7 +133,7 @@ fn alloc_min_size() {
     const PGSIZE: usize = 8;
     const NUM_BLOCKS: usize = 8;
 
-    let mut allocator = BuddyAllocator::<ORDER, PGSIZE>::new_with_global(NUM_BLOCKS);
+    let mut allocator = BuddyAllocator::<ORDER, PGSIZE, Global>::new(NUM_BLOCKS);
 
     unsafe {
         let a = allocator.allocate(1).unwrap();
@@ -152,7 +150,7 @@ fn alloc_write_and_free() {
     const PGSIZE: usize = 8;
     const NUM_BLOCKS: usize = 8;
 
-    let mut allocator = BuddyAllocator::<ORDER, PGSIZE>::new_with_global(NUM_BLOCKS);
+    let mut allocator = BuddyAllocator::<ORDER, PGSIZE, Global>::new(NUM_BLOCKS);
 
     unsafe {
         let size = 64;
@@ -169,8 +167,6 @@ fn alloc_write_and_free() {
 
         allocator.free(ptr);
     }
-
-    unsafe { allocator.free_with_global() };
 }
 
 #[test]
@@ -181,7 +177,7 @@ fn coalesce_one() {
     const PGSIZE: usize = 8;
     const NUM_BLOCKS: usize = 1;
 
-    let mut allocator = BuddyAllocator::<ORDER, PGSIZE>::new_with_global(NUM_BLOCKS);
+    let mut allocator = BuddyAllocator::<ORDER, PGSIZE, Global>::new(NUM_BLOCKS);
 
     unsafe {
         // Allocate two minimum-size blocks to split the top block.
@@ -207,8 +203,6 @@ fn coalesce_one() {
         let c = allocator.allocate(2 * PGSIZE).unwrap();
         allocator.free(c);
     }
-
-    unsafe { allocator.free_with_global() };
 }
 
 #[test]
@@ -217,7 +211,7 @@ fn coalesce_many() {
     const PGSIZE: usize = 8;
     const NUM_BLOCKS: usize = 8;
 
-    let mut allocator = BuddyAllocator::<ORDER, PGSIZE>::new_with_global(NUM_BLOCKS);
+    let mut allocator = BuddyAllocator::<ORDER, PGSIZE, Global>::new(NUM_BLOCKS);
 
     for o in (0..ORDER).rev() {
         let alloc_size = 2usize.pow((ORDER - o - 1) as u32) * PGSIZE;
@@ -246,6 +240,4 @@ fn coalesce_many() {
             }
         }
     }
-
-    unsafe { allocator.free_with_global() };
 }
