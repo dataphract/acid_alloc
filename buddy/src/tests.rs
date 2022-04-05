@@ -5,7 +5,7 @@ use std::prelude::rust_2021::*;
 
 use quickcheck::{Arbitrary, Gen, QuickCheck};
 
-use crate::{BuddyAllocator, Global};
+use crate::{buddy::BuddyAllocator, Global};
 
 enum AllocatorOpTag {
     Allocate,

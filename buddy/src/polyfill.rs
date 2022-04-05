@@ -3,12 +3,12 @@
 //! The implementations in this module are copied more-or-less verbatim from the
 //! standard library source.
 
-#[cfg(not(feature = "int_log"))]
+#[cfg(not(feature = "unstable"))]
 pub trait UsizeExt {
     fn log2(self) -> u32;
 }
 
-#[cfg(not(feature = "int_log"))]
+#[cfg(not(feature = "unstable"))]
 impl UsizeExt for usize {
     #[inline]
     fn log2(self) -> u32 {
@@ -16,24 +16,25 @@ impl UsizeExt for usize {
     }
 }
 
-#[cfg(not(feature = "alloc_layout_extra"))]
+#[cfg(not(feature = "unstable"))]
 use core::alloc::{Layout, LayoutError};
 
-#[cfg(not(feature = "alloc_layout_extra"))]
+#[cfg(not(feature = "unstable"))]
 pub trait LayoutExt: Sized {
     fn padding_needed_for(&self, align: usize) -> usize;
     fn repeat(&self, n: usize) -> Result<(Self, usize), LayoutError>;
 }
 
-#[cfg(not(feature = "alloc_layout_extra"))]
+#[cfg(not(feature = "unstable"))]
 fn layout_error() -> LayoutError {
     // HACK: LayoutError is #[non_exhaustive], so it can't be
     // constructed outside the standard library. As a workaround,
     // deliberately pass bad values to the constructor to get one.
+
     Layout::from_size_align(0, 0).unwrap_err()
 }
 
-#[cfg(not(feature = "alloc_layout_extra"))]
+#[cfg(not(feature = "unstable"))]
 impl LayoutExt for Layout {
     #[inline]
     fn padding_needed_for(&self, align: usize) -> usize {
@@ -127,5 +128,17 @@ impl<T> NonNullStrict<T> for NonNull<T> {
         T: Sized,
     {
         self.with_addr(f(self.addr()))
+    }
+}
+
+#[cfg(all(any(feature = "sptr", feature = "unstable"), test))]
+mod tests {
+    #[cfg(not(feature = "unstable"))]
+    use super::*;
+
+    #[cfg(not(feature = "unstable"))]
+    #[test]
+    fn layout_error_returns_error() {
+        let _: LayoutError = layout_error();
     }
 }
