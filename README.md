@@ -1,12 +1,12 @@
 # `acid_alloc`
 
-### Bare metal-friendly allocators.
+## Bare metal-friendly allocators.
 
 This crate provides allocators that can function without the backing of another
 allocator. This makes them suitable for use on bare metal or with low-level OS
 allocation facilities like `brk(2)`.
 
-### Acknowledgments
+## Acknowledgments
 
 This crate includes stable-compatible polyfills for a number of unstable APIs
 whose implementations are reproduced verbatim here. These features are listed
@@ -19,7 +19,8 @@ below along with their authors and/or maintainers:
 This crate also depends on [`sptr`] (also authored by Gankra) to reproduce
 strict provenance on stable Rust.
 
-_If I've misattributed any of this work, or a contributor to these features is missing, please open an issue!_
+_If I've misattributed any of this work, or a contributor to these features is
+missing, please open an issue!_
 
 [library api team]: https://www.rust-lang.org/governance/teams/library#Library%20API%20team
 [amanieu d'antras]: https://github.com/Amanieu
@@ -27,7 +28,7 @@ _If I've misattributed any of this work, or a contributor to these features is m
 [aria beingessner (aka gankra)]: https://github.com/Gankra
 [`sptr`]: https://crates.io/crates/sptr
 
-### License
+## License
 
 Licensed under either of
 
@@ -38,7 +39,7 @@ Licensed under either of
 
 at your option.
 
-### Contribution
+## Contribution
 
 Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
