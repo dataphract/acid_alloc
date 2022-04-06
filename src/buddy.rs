@@ -507,7 +507,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator>
     /// # Errors
     ///
     /// Returns `None` if a block of `size` bytes could not be allocated.
-    pub unsafe fn allocate(&mut self, size: usize) -> Option<NonNull<[u8]>> {
+    pub fn allocate(&mut self, size: usize) -> Option<NonNull<[u8]>> {
         if size == 0 {
             return None;
         }

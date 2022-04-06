@@ -272,7 +272,7 @@ fn coalesce_many() {
 
         let mut allocs = Vec::with_capacity(num_allocs);
         for _ in 0..num_allocs {
-            let ptr = unsafe { allocator.allocate(alloc_size).unwrap() };
+            let ptr = allocator.allocate(alloc_size).unwrap();
 
             {
                 // Do this in a separate scope so that the slice no longer
