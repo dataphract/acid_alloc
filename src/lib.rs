@@ -1,6 +1,7 @@
 //! Bare metal-friendly allocators.
 
 #![no_std]
+#![warn(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![cfg_attr(feature = "unstable", feature(alloc_layout_extra))]
 #![cfg_attr(feature = "unstable", feature(allocator_api))]
@@ -33,7 +34,10 @@ mod tests;
 use core::{alloc::Layout, num::NonZeroUsize, ptr::NonNull};
 
 #[cfg(any(feature = "sptr", feature = "unstable"))]
-use core::mem::{self, MaybeUninit};
+use core::{
+    mem::{self, MaybeUninit},
+    ptr,
+};
 
 #[cfg(feature = "unstable")]
 use core::alloc::Allocator;
@@ -122,6 +126,13 @@ impl BasePtr {
     /// The returned pointer has the provenance of this pointer.
     fn with_addr(self, addr: NonZeroUsize) -> NonNull<u8> {
         self.ptr.with_addr(addr)
+    }
+
+    fn with_addr_and_len(self, addr: NonZeroUsize, len: usize) -> NonNull<[u8]> {
+        let ptr = self.ptr.as_ptr().with_addr(addr.get());
+        let raw_slice = ptr::slice_from_raw_parts_mut(ptr, len);
+
+        unsafe { NonNull::new_unchecked(raw_slice) }
     }
 
     /// Creates a new pointer with the given offset.

@@ -62,12 +62,13 @@ impl Arbitrary for AllocatorOp {
 fn allocations_are_mutually_exclusive() {
     // This config produces an allocator over 65536 bytes with block sizes from
     // 16 to 1024.
-    const PGSIZE: usize = 16;
-    const ORDER: usize = 7;
+    const LEVELS: usize = 7;
+    const MIN_SIZE: usize = 16;
+    const MAX_SIZE: usize = MIN_SIZE << (LEVELS - 1);
     const BLOCKS: usize = 16;
 
-    fn prop<const PGSIZE: usize, const ORDER: usize>(ops: Vec<AllocatorOp>) -> bool {
-        let mut alloc = BuddyAllocator::<PGSIZE, ORDER, Global>::new(BLOCKS);
+    fn prop<const BLK_SIZE: usize, const LEVELS: usize>(ops: Vec<AllocatorOp>) -> bool {
+        let mut alloc = BuddyAllocator::<BLK_SIZE, LEVELS, Global>::new(BLOCKS);
 
         let mut allocations = Vec::with_capacity(ops.len());
 
@@ -110,7 +111,7 @@ fn allocations_are_mutually_exclusive() {
                         }
                     }
 
-                    unsafe { alloc.free(NonNull::new(a.ptr.cast()).unwrap()) };
+                    unsafe { alloc.deallocate(NonNull::new(a.ptr.cast()).unwrap()) };
                 }
             }
         }
@@ -119,48 +120,92 @@ fn allocations_are_mutually_exclusive() {
     }
 
     let mut qc = QuickCheck::new();
-    qc.quickcheck(prop::<PGSIZE, ORDER> as fn(_) -> bool);
+    qc.quickcheck(prop::<MAX_SIZE, LEVELS> as fn(_) -> bool);
+}
+
+#[test]
+#[should_panic]
+fn zero_levels_panics() {
+    const LEVELS: usize = 0;
+    const BLK_SIZE: usize = 256;
+    const NUM_BLOCKS: usize = 8;
+
+    let _ = BuddyAllocator::<BLK_SIZE, LEVELS, Global>::new(NUM_BLOCKS);
+}
+
+#[test]
+#[should_panic]
+fn too_many_levels_panics() {
+    const LEVELS: usize = usize::BITS as usize;
+    const BLK_SIZE: usize = 256;
+    const NUM_BLOCKS: usize = 8;
+
+    let _ = BuddyAllocator::<BLK_SIZE, LEVELS, Global>::new(NUM_BLOCKS);
+}
+
+#[test]
+#[should_panic]
+fn non_power_of_two_block_size_panics() {
+    const LEVELS: usize = usize::BITS as usize;
+    const BLK_SIZE: usize = 255;
+    const NUM_BLOCKS: usize = 8;
+
+    let _ = BuddyAllocator::<BLK_SIZE, LEVELS, Global>::new(NUM_BLOCKS);
+}
+
+#[test]
+#[should_panic]
+fn too_small_min_block_size_panics() {
+    const LEVELS: usize = 8;
+    const MIN_SIZE: usize = core::mem::size_of::<usize>() / 2;
+    const BLK_SIZE: usize = MIN_SIZE << (LEVELS - 1);
+    const NUM_BLOCKS: usize = 8;
+
+    let _ = BuddyAllocator::<BLK_SIZE, LEVELS, Global>::new(NUM_BLOCKS);
 }
 
 #[test]
 fn create_and_destroy() {
     // These parameters give a maximum block size of 1KiB and a total size of 8KiB.
-    const ORDER: usize = 8;
-    const PGSIZE: usize = 8;
+    const LEVELS: usize = 8;
+    const MIN_SIZE: usize = 8;
+    const MAX_SIZE: usize = MIN_SIZE << (LEVELS - 1);
     const NUM_BLOCKS: usize = 8;
 
-    let allocator = BuddyAllocator::<PGSIZE, ORDER, Global>::new(NUM_BLOCKS);
+    let allocator = BuddyAllocator::<MAX_SIZE, LEVELS, Global>::new(NUM_BLOCKS);
     drop(allocator);
 }
 
 #[test]
 fn alloc_min_size() {
-    const ORDER: usize = 4;
-    const PGSIZE: usize = 8;
+    const LEVELS: usize = 4;
+    const MIN_SIZE: usize = 8;
+    const MAX_SIZE: usize = MIN_SIZE << (LEVELS - 1);
     const NUM_BLOCKS: usize = 8;
 
-    let mut allocator = BuddyAllocator::<PGSIZE, ORDER, Global>::new(NUM_BLOCKS);
+    let mut allocator = BuddyAllocator::<MAX_SIZE, LEVELS, Global>::new(NUM_BLOCKS);
 
     unsafe {
         let a = allocator.allocate(1).unwrap();
         let _b = allocator.allocate(1).unwrap();
         let c = allocator.allocate(1).unwrap();
-        allocator.free(a);
-        allocator.free(c);
+        allocator.deallocate(a.cast());
+        allocator.deallocate(c.cast());
     }
 }
 
 #[test]
 fn alloc_write_and_free() {
-    const ORDER: usize = 8;
-    const PGSIZE: usize = 8;
+    const LEVELS: usize = 8;
+    const MIN_SIZE: usize = 8;
+    const MAX_SIZE: usize = MIN_SIZE << (LEVELS - 1);
     const NUM_BLOCKS: usize = 8;
 
-    let mut allocator = BuddyAllocator::<PGSIZE, ORDER, Global>::new(NUM_BLOCKS);
+    let mut allocator = BuddyAllocator::<MAX_SIZE, LEVELS, Global>::new(NUM_BLOCKS);
 
     unsafe {
         let size = 64;
-        let ptr: NonNull<u8> = allocator.allocate(size).unwrap();
+        let ptr: NonNull<u8> = allocator.allocate(size).unwrap().cast();
 
         {
             // Do this in a separate scope so that the slice no longer
@@ -171,7 +216,7 @@ fn alloc_write_and_free() {
             }
         }
 
-        allocator.free(ptr);
+        allocator.deallocate(ptr);
     }
 }
 
@@ -179,48 +224,50 @@ fn alloc_write_and_free() {
 fn coalesce_one() {
     // This configuration gives a 2-level buddy allocator with one
     // splittable top-level block.
-    const ORDER: usize = 2;
-    const PGSIZE: usize = 8;
+    const LEVELS: usize = 2;
+    const MIN_SIZE: usize = 8;
+    const MAX_SIZE: usize = MIN_SIZE << (LEVELS - 1);
     const NUM_BLOCKS: usize = 1;
 
-    let mut allocator = BuddyAllocator::<PGSIZE, ORDER, Global>::new(NUM_BLOCKS);
+    let mut allocator = BuddyAllocator::<MAX_SIZE, LEVELS, Global>::new(NUM_BLOCKS);
 
     unsafe {
         // Allocate two minimum-size blocks to split the top block.
-        let a = allocator.allocate(PGSIZE).unwrap();
-        let b = allocator.allocate(PGSIZE).unwrap();
+        let a = allocator.allocate(MIN_SIZE).unwrap();
+        let b = allocator.allocate(MIN_SIZE).unwrap();
 
         // Free both blocks, coalescing them.
-        allocator.free(a);
-        allocator.free(b);
+        allocator.deallocate(a.cast());
+        allocator.deallocate(b.cast());
 
         // Allocate the entire region to ensure coalescing worked.
-        let c = allocator.allocate(2 * PGSIZE).unwrap();
-        allocator.free(c);
+        let c = allocator.allocate(2 * MIN_SIZE).unwrap();
+        allocator.deallocate(c.cast());
 
         // Same as above.
-        let a = allocator.allocate(PGSIZE).unwrap();
-        let b = allocator.allocate(PGSIZE).unwrap();
+        let a = allocator.allocate(MIN_SIZE).unwrap();
+        let b = allocator.allocate(MIN_SIZE).unwrap();
 
         // Free both blocks, this time in reverse order.
-        allocator.free(a);
-        allocator.free(b);
+        allocator.deallocate(a.cast());
+        allocator.deallocate(b.cast());
 
-        let c = allocator.allocate(2 * PGSIZE).unwrap();
-        allocator.free(c);
+        let c = allocator.allocate(2 * MIN_SIZE).unwrap();
+        allocator.deallocate(c.cast());
     }
 }
 
 #[test]
 fn coalesce_many() {
-    const ORDER: usize = 4;
-    const PGSIZE: usize = 8;
+    const LEVELS: usize = 4;
+    const MIN_SIZE: usize = 8;
+    const MAX_SIZE: usize = MIN_SIZE << (LEVELS - 1);
     const NUM_BLOCKS: usize = 8;
 
-    let mut allocator = BuddyAllocator::<PGSIZE, ORDER, Global>::new(NUM_BLOCKS);
+    let mut allocator = BuddyAllocator::<MAX_SIZE, LEVELS, Global>::new(NUM_BLOCKS);
 
-    for o in (0..ORDER).rev() {
-        let alloc_size = 2usize.pow((ORDER - o - 1) as u32) * PGSIZE;
+    for o in (0..LEVELS).rev() {
+        let alloc_size = 2usize.pow((LEVELS - o - 1) as u32) * MIN_SIZE;
         let num_allocs = 2usize.pow(o as u32) * NUM_BLOCKS;
 
         let mut allocs = Vec::with_capacity(num_allocs);
@@ -231,7 +278,8 @@ fn coalesce_many() {
             {
                 // Do this in a separate scope so that the slice no longer
                 // exists when ptr is freed
-                let buf: &mut [u8] = unsafe { slice::from_raw_parts_mut(ptr.as_ptr(), alloc_size) };
+                let buf: &mut [u8] =
+                    unsafe { slice::from_raw_parts_mut(ptr.as_ptr().cast(), alloc_size) };
                 for (i, byte) in buf.iter_mut().enumerate() {
                     *byte = (i % 256) as u8;
                 }
@@ -242,7 +290,7 @@ fn coalesce_many() {
 
         for alloc in allocs {
             unsafe {
-                allocator.free(alloc);
+                allocator.deallocate(alloc.cast());
             }
         }
     }
