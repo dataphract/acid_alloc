@@ -57,20 +57,46 @@ impl BuddyLevel {
     ///
     /// If the free list is empty, returns `None`.
     unsafe fn free_list_pop(&mut self, base: BasePtr) -> Option<NonZeroUsize> {
-        let head = self.free_list.take()?;
+        let old_head = self.free_list.take()?;
 
-        self.free_list = unsafe { base.link_mut(head).next };
+        unsafe {
+            if let Some(new_head) = base.link_mut(old_head).next {
+                let new_head_mut = base.link_mut(new_head);
+                new_head_mut.prev = None;
+                self.free_list = Some(new_head);
+            }
+        }
 
-        Some(head)
+        Some(old_head)
     }
 
     /// Pushes a block onto the free list.
     unsafe fn free_list_push(&mut self, base: BasePtr, block: NonZeroUsize) {
         assert_eq!(block.get() & (mem::align_of::<BlockLink>() - 1), 0);
 
-        let uninit = base.with_addr(block).cast::<MaybeUninit<BlockLink>>();
-        let link = unsafe { BlockLink::init(uninit, self.free_list) };
-        self.free_list = Some(link);
+        if let Some(old_head) = self.free_list {
+            let old_head_mut = unsafe { base.link_mut(old_head) };
+            old_head_mut.prev = Some(block);
+        }
+
+        let old_head = self.free_list;
+        let new_head = block;
+
+        // If `old_head` exists, it points back to `block`.
+
+        unsafe {
+            base.init_link_at(
+                block,
+                BlockLink {
+                    next: old_head,
+                    prev: None,
+                },
+            )
+        };
+
+        // `new_head` points forward to `old_head`.
+        // `old_head` points back to `new_head`.
+        self.free_list = Some(new_head);
     }
 
     /// Removes the specified block from the free list.
@@ -187,21 +213,21 @@ impl BuddyLevel {
 /// These parameters are subject to the following invariants:
 /// - `BLK_SIZE` must be a power of two.
 /// - `LEVELS` must be nonzero and less than `usize::BITS`.
-/// - The minumum block size must be at least `mem::size_of<usize>()`;  it can
-///   be calculated with the formula `BLK_SIZE >> (LEVELS - 1)`.
+/// - The minumum block size must be at least `2 * mem::size_of<usize>()`;  it
+///   can be calculated with the formula `BLK_SIZE >> (LEVELS - 1)`.
 ///
 /// Attempting to construct a `BuddyAllocator` whose const parameters violate
 /// these invariants will result in a panic.
 ///
 /// For example, the type of a buddy allocator which can allocate blocks of
-/// sizes from 8 to 4096 bytes would be:
+/// sizes from 16 to 4096 bytes would be:
 ///
 /// ```
 /// use acid_alloc::BuddyAllocator;
 ///
 /// // Minimum block size == BLK_SIZE >> (LEVELS - 1)
-/// //                  8 ==     4096 >> (    10 - 1)
-/// type CustomBuddyAllocator<A> = BuddyAllocator<4096, 10, A>;
+/// //                 16 ==     4096 >> (     9 - 1)
+/// type CustomBuddyAllocator<A> = BuddyAllocator<4096, 9, A>;
 /// # fn main() {}
 /// ```
 pub struct BuddyAllocator<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> {
@@ -372,7 +398,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator>
         let min_block_size = BLK_SIZE >> (LEVELS - 1);
         assert!(
             min_block_size >= mem::size_of::<BlockLink>(),
-            "buddy allocator minimum block size must be at least pointer-sized"
+            "buddy allocator minimum block size must be at least mem::size_of::<BlockLink>() bytes"
         );
 
         min_block_size
@@ -713,8 +739,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> BuddyAllocatorParts<BLK_SIZE, L
         );
 
         let mut levels = unsafe {
-            // TODO: This is the stdlib's implementation of
-            // MaybeUninit::array_assume_init(). When that's stable, use it
+            // When `MaybeUninit::array_assume_init()` is stable, use that
             // instead.
             //
             // SAFETY:
@@ -724,29 +749,37 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> BuddyAllocatorParts<BLK_SIZE, L
             (&levels as *const _ as *const [BuddyLevel; LEVELS]).read()
         };
 
-        // Initialize the top-level free list by emplacing links in each block.
-        let mut next_link = None;
-        for block_idx in (0..num_blocks).rev() {
-            let block_offset = block_idx * levels[0].block_size;
+        let base = BasePtr { ptr: base };
 
-            let link = unsafe {
-                // TODO: use NonZeroUsize::checked_add (this is usize::checked_add)
-                BlockLink::init(
-                    base.map_addr(|b| {
-                        let raw = b.get().checked_add(block_offset).unwrap();
-                        NonZeroUsize::new(raw).unwrap()
-                    })
-                    .cast(),
-                    next_link,
-                )
-            };
-            next_link = Some(link);
+        // Initialize the top-level free list by emplacing links in each block.
+        for block_idx in 0..num_blocks {
+            let block_offset = block_idx.checked_mul(levels[0].block_size).unwrap();
+
+            let block_addr =
+                NonZeroUsize::new(base.ptr.addr().get().checked_add(block_offset).unwrap())
+                    .unwrap();
+
+            // All blocks except the first link to the previous block.
+            let prev = (block_idx > 0).then(|| {
+                let prev_addr = block_addr.get().checked_sub(levels[0].block_size).unwrap();
+                NonZeroUsize::new(prev_addr).unwrap()
+            });
+
+            // All blocks except the last link to the next block.
+            let next = (block_idx < num_blocks - 1).then(|| {
+                let next_addr = block_addr.get().checked_add(levels[0].block_size).unwrap();
+                NonZeroUsize::new(next_addr).unwrap()
+            });
+
+            unsafe {
+                base.init_link_at(block_addr, BlockLink { prev, next });
+            }
         }
 
-        levels[0].free_list = next_link;
+        levels[0].free_list = (num_blocks > 0).then(|| base.ptr.addr());
 
         BuddyAllocatorParts {
-            base: BasePtr { ptr: base },
+            base,
             metadata,
             num_blocks,
             levels,

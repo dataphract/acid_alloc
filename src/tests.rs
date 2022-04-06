@@ -168,7 +168,7 @@ fn too_small_min_block_size_panics() {
 fn create_and_destroy() {
     // These parameters give a maximum block size of 1KiB and a total size of 8KiB.
     const LEVELS: usize = 8;
-    const MIN_SIZE: usize = 8;
+    const MIN_SIZE: usize = 16;
     const MAX_SIZE: usize = MIN_SIZE << (LEVELS - 1);
     const NUM_BLOCKS: usize = 8;
 
@@ -179,7 +179,7 @@ fn create_and_destroy() {
 #[test]
 fn alloc_min_size() {
     const LEVELS: usize = 4;
-    const MIN_SIZE: usize = 8;
+    const MIN_SIZE: usize = 16;
     const MAX_SIZE: usize = MIN_SIZE << (LEVELS - 1);
     const NUM_BLOCKS: usize = 8;
 
@@ -197,7 +197,7 @@ fn alloc_min_size() {
 #[test]
 fn alloc_write_and_free() {
     const LEVELS: usize = 8;
-    const MIN_SIZE: usize = 8;
+    const MIN_SIZE: usize = 16;
     const MAX_SIZE: usize = MIN_SIZE << (LEVELS - 1);
     const NUM_BLOCKS: usize = 8;
 
@@ -225,7 +225,7 @@ fn coalesce_one() {
     // This configuration gives a 2-level buddy allocator with one
     // splittable top-level block.
     const LEVELS: usize = 2;
-    const MIN_SIZE: usize = 8;
+    const MIN_SIZE: usize = 16;
     const MAX_SIZE: usize = MIN_SIZE << (LEVELS - 1);
     const NUM_BLOCKS: usize = 1;
 
@@ -260,20 +260,19 @@ fn coalesce_one() {
 #[test]
 fn coalesce_many() {
     const LEVELS: usize = 4;
-    const MIN_SIZE: usize = 8;
+    const MIN_SIZE: usize = 16;
     const MAX_SIZE: usize = MIN_SIZE << (LEVELS - 1);
     const NUM_BLOCKS: usize = 8;
 
     let mut allocator = BuddyAllocator::<MAX_SIZE, LEVELS, Global>::new(NUM_BLOCKS);
 
-    for o in (0..LEVELS).rev() {
-        let alloc_size = 2usize.pow((LEVELS - o - 1) as u32) * MIN_SIZE;
-        let num_allocs = 2usize.pow(o as u32) * NUM_BLOCKS;
+    for lvl in (0..LEVELS).rev() {
+        let alloc_size = 2usize.pow((LEVELS - lvl - 1) as u32) * MIN_SIZE;
+        let num_allocs = 2usize.pow(lvl as u32) * NUM_BLOCKS;
 
         let mut allocs = Vec::with_capacity(num_allocs);
-        for i in 0..num_allocs {
+        for _ in 0..num_allocs {
             let ptr = unsafe { allocator.allocate(alloc_size).unwrap() };
-            std::println!("alloced {i}");
 
             {
                 // Do this in a separate scope so that the slice no longer

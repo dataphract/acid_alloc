@@ -34,10 +34,7 @@ mod tests;
 use core::{alloc::Layout, num::NonZeroUsize, ptr::NonNull};
 
 #[cfg(any(feature = "sptr", feature = "unstable"))]
-use core::{
-    mem::{self, MaybeUninit},
-    ptr,
-};
+use core::ptr;
 
 #[cfg(feature = "unstable")]
 use core::alloc::Allocator;
@@ -54,46 +51,16 @@ use crate::polyfill::*;
 /// linked list.
 #[repr(C)]
 struct BlockLink {
-    // Rather than using a pointer, store only the address of the next link.
-    // This avoids accidentally violating stacked borrows; the link "points to"
-    // the next block, but by forgoing an actual pointer, it does not imply a
-    // borrow.
+    // Rather than using pointers, store only the addresses of the previous and
+    // next links.  This avoids accidentally violating stacked borrows; the
+    // links "point to" other blocks, but by forgoing actual pointers, no borrow
+    // is implied.
     //
     // NOTE: Using this method, any actual pointer to a block must be acquired
-    // via the allocator base pointer, and NOT by casting this address directly!
+    // via the allocator base pointer, and NOT by casting these addresses
+    // directly!
+    prev: Option<NonZeroUsize>,
     next: Option<NonZeroUsize>,
-}
-
-#[cfg(any(feature = "sptr", feature = "unstable"))]
-impl BlockLink {
-    /// Initializes a `BlockLink` at the pointed-to location.
-    ///
-    /// The address of the initialized `BlockLink` is returned rather than the
-    /// pointer. This indicates to the compiler that any effective mutable
-    /// borrow of `ptr` has ended.
-    ///
-    /// # Safety
-    ///
-    /// The caller must uphold the following invariants:
-    /// - `ptr` must be valid for reads and writes for `size_of::<BlockLink>()`
-    ///   bytes.
-    /// - If `next` is `Some(n)`, then `n` must be the address of an
-    ///   initialized `BlockLink` value.
-    unsafe fn init(
-        mut ptr: NonNull<MaybeUninit<BlockLink>>,
-        next: Option<NonZeroUsize>,
-    ) -> NonZeroUsize {
-        assert_eq!(ptr.as_ptr().align_offset(mem::align_of::<BlockLink>()), 0);
-
-        let addr = unsafe {
-            let uninit_mut: &mut MaybeUninit<_> = ptr.as_mut();
-            let ptr = uninit_mut.as_mut_ptr();
-            ptr.write(BlockLink { next });
-            ptr.addr()
-        };
-
-        NonZeroUsize::new(addr).unwrap()
-    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -109,6 +76,24 @@ impl BasePtr {
         block.get().checked_sub(self.ptr.addr().get()).unwrap()
     }
 
+    /// Initializes a `BlockLink` at the given address.
+    ///
+    /// # Safety
+    ///
+    /// The caller must uphold the following invariants:
+    /// - `addr` must be a properly aligned address for `BlockLink` values.
+    /// - The memory at `addr` must be within the provenance of `self` and valid
+    ///   for reads and writes for `size_of::<BlockLink>()` bytes
+    /// - The memory at `addr` must be unallocated by the associated allocator.
+    unsafe fn init_link_at(self, addr: NonZeroUsize, link: BlockLink) {
+        unsafe {
+            self.with_addr(addr)
+                .cast::<BlockLink>()
+                .as_ptr()
+                .write(link)
+        };
+    }
+
     /// Returns a mutable reference to the `BlockLink` at `link`.
     ///
     /// # Safety
@@ -116,7 +101,8 @@ impl BasePtr {
     /// The caller must uphold the following invariants:
     /// - `link` must be a properly aligned address for `BlockLink` values.
     /// - The memory at `link` must contain a properly initialized `BlockLink` value.
-    /// - The memory at `link` must be unallocated by the associated allocator.
+    /// - The memory at `link` must be within the provenance of `self` and
+    ///   unallocated by the associated allocator.
     unsafe fn link_mut<'a>(self, link: NonZeroUsize) -> &'a mut BlockLink {
         unsafe { self.ptr.with_addr(link).cast::<BlockLink>().as_mut() }
     }
