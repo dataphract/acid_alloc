@@ -693,7 +693,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> BuddyAllocatorParts<BLK_SIZE, L
             let block_size = 2_usize.pow((LEVELS - li) as u32 - 1) * min_block_size;
             let block_factor = 2_usize.pow(li as u32);
             let num_blocks = block_factor * num_blocks;
-            let num_pairs = num_blocks + 1 / 2;
+            let num_pairs = (num_blocks + 1) / 2;
 
             let buddy_size = Bitmap::map_layout(num_pairs).size();
             let buddy_bitmap = unsafe { Bitmap::new(num_pairs, meta_curs as *mut u64) };
