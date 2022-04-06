@@ -115,9 +115,7 @@ impl BuddyLevel {
     }
 
     /// Allocates a block from the free list.
-    ///
-    /// The returned pointer has the provenance of `base`.
-    unsafe fn allocate_one(&mut self, base: BasePtr, align: usize) -> Option<NonNull<u8>> {
+    unsafe fn allocate(&mut self, base: BasePtr, align: usize) -> Option<NonZeroUsize> {
         let mut current = self.free_list;
 
         while let Some(cur) = current {
@@ -132,24 +130,21 @@ impl BuddyLevel {
         let block = current?;
 
         unsafe { self.free_list_remove(base, block) };
-
         let ofs = base.offset_to(block);
         self.buddies.toggle(self.buddy_bit(ofs));
 
-        Some(base.with_addr(block))
+        Some(block)
     }
 
-    /// Assigns half a block from the level above this one.
-    unsafe fn assign_half(&mut self, base: BasePtr, block: NonZeroUsize) {
+    /// Assigns a block to this level.
+    unsafe fn assign(&mut self, base: BasePtr, block: NonZeroUsize) {
         let ofs = base.offset_to(block);
 
         let buddy_bit = self.buddy_bit(ofs);
         assert!(!self.buddies.get(buddy_bit));
         self.buddies.set(buddy_bit, true);
 
-        unsafe {
-            self.free_list_push(base, block);
-        }
+        unsafe { self.free_list_push(base, block) };
     }
 
     fn free(&mut self, base: BasePtr, block: NonNull<u8>, coalesce: bool) -> Option<NonNull<u8>> {
@@ -450,7 +445,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator>
         full_layout
     }
 
-    fn alloc_level(&self, size: usize) -> Option<usize> {
+    fn level_for(&self, size: usize) -> Option<usize> {
         fn round_up_pow2(x: usize) -> Option<usize> {
             match x {
                 0 => None,
@@ -510,32 +505,32 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator>
             return Err(AllocError);
         }
 
-        let target_level = self.alloc_level(layout.size()).ok_or(AllocError)?;
+        let target_level = self.level_for(layout.size()).ok_or(AllocError)?;
 
         // If there is a free block of the correct size, return it immediately.
         if let Some(block) =
-            unsafe { self.levels[target_level].allocate_one(self.base, layout.align()) }
+            unsafe { self.levels[target_level].allocate(self.base, layout.align()) }
         {
-            return Ok(self.base.with_addr_and_size(block.addr(), layout.size()));
+            return Ok(self.base.with_addr_and_size(block, layout.size()));
         }
 
         // Otherwise, scan increasing block sizes until a free block is found.
         let (block, init_level) = (0..target_level)
             .rev()
-            .find_map(|level| {
-                unsafe { self.levels[level].allocate_one(self.base, layout.align()) }
-                    .map(|blk| (blk, level))
+            .find_map(|level| unsafe {
+                self.levels[level]
+                    .allocate(self.base, layout.align())
+                    .map(|block| (block, level))
             })
             .ok_or(AllocError)?;
 
-        let block_ofs = self.base.offset_to(block.addr());
+        let block_ofs = self.base.offset_to(block);
 
-        // Once a free block is found, split it repeatedly to obtain a
-        // suitably sized block.
+        // Split the block repeatedly to obtain a suitably sized block.
         for level in init_level..target_level {
             // Split the block. The address of the front half does not change.
             let half_block_size = self.levels[level].block_size / 2;
-            let back_half = NonZeroUsize::new(block.addr().get() + half_block_size).unwrap();
+            let back_half = NonZeroUsize::new(block.get() + half_block_size).unwrap();
 
             // Mark the block as split.
             let split_bit = self.levels[level].index_of(block_ofs);
@@ -544,11 +539,11 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator>
             }
 
             // Add one half of the split block to the next level's free list.
-            unsafe { self.levels[level + 1].assign_half(self.base, back_half) };
+            unsafe { self.levels[level + 1].assign(self.base, back_half) };
         }
 
         // The returned block inherits the provenance of the base pointer.
-        Ok(self.base.with_addr_and_size(block.addr(), layout.size()))
+        Ok(self.base.with_addr_and_size(block, layout.size()))
     }
 
     /// Deallocates the memory referenced by `ptr`.
