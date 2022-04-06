@@ -74,15 +74,16 @@ impl BuddyLevel {
     unsafe fn free_list_push(&mut self, base: BasePtr, block: NonZeroUsize) {
         assert_eq!(block.get() & (mem::align_of::<BlockLink>() - 1), 0);
 
+        let new_head = block;
+
         if let Some(old_head) = self.free_list {
             let old_head_mut = unsafe { base.link_mut(old_head) };
-            old_head_mut.prev = Some(block);
+            old_head_mut.prev = Some(new_head);
         }
 
         let old_head = self.free_list;
-        let new_head = block;
 
-        // If `old_head` exists, it points back to `block`.
+        // If `old_head` exists, it points back to `new_head`.
 
         unsafe {
             base.init_link_at(
@@ -101,47 +102,30 @@ impl BuddyLevel {
 
     /// Removes the specified block from the free list.
     ///
-    /// If the block is not present, returns `None`.
-    unsafe fn free_list_find_remove(
-        &mut self,
-        base: BasePtr,
-        block: NonZeroUsize,
-    ) -> Option<NonZeroUsize> {
-        let head = self.free_list?;
+    /// # Safety
+    ///
+    /// The caller must uphold the following invariants:
+    /// - The memory at `block` must be within the provenance of `base` and
+    ///   valid for reads and writes for `size_of::<BlockLink>()` bytes.
+    /// - `block` must be the address of an element of `self.free_list`.
+    unsafe fn free_list_remove(&mut self, base: BasePtr, block: NonZeroUsize) {
+        unsafe {
+            let removed = base.link_mut(block);
 
-        if head == block {
-            self.free_list = unsafe { base.link_mut(head).next.take() };
+            match removed.prev {
+                // Link `prev` forward to `next`.
+                Some(p) => base.link_mut(p).next = removed.next,
 
-            return Some(head);
-        }
+                // If there's no previous block, then `removed` is the head of
+                // the free list.
+                None => self.free_list = removed.next,
+            }
 
-        let mut cur = head;
-        loop {
-            let next = match unsafe { base.link_mut(cur).next } {
-                Some(n) => n,
-
-                // Block not found in free list.
-                None => break,
-            };
-
-            let prev = cur;
-            cur = next;
-            assert!(prev != cur);
-
-            if cur == block {
-                unsafe {
-                    // SAFETY: `prev` and `cur` must not be overlapping (which they shouldn't be).
-                    let prev_mut = base.link_mut(prev);
-                    let cur_mut = base.link_mut(cur);
-
-                    prev_mut.next = cur_mut.next.take();
-                }
-
-                return Some(block);
+            if let Some(n) = removed.next {
+                // Link `next` back to `prev`.
+                base.link_mut(n).prev = removed.prev;
             }
         }
-
-        None
     }
 
     /// Allocates a block from the free list.
@@ -193,9 +177,7 @@ impl BuddyLevel {
                 NonZeroUsize::new(base.ptr.addr().get().checked_add(buddy_ofs).unwrap()).unwrap();
 
             // Remove the buddy block from the free list.
-            if unsafe { self.free_list_find_remove(base, buddy) }.is_none() {
-                panic!("missing buddy in free list");
-            }
+            unsafe { self.free_list_remove(base, buddy) };
 
             // Return the coalesced block.
             let coalesced_ofs = buddy_ofs & !self.block_size;

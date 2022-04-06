@@ -83,7 +83,7 @@ impl BasePtr {
     /// The caller must uphold the following invariants:
     /// - `addr` must be a properly aligned address for `BlockLink` values.
     /// - The memory at `addr` must be within the provenance of `self` and valid
-    ///   for reads and writes for `size_of::<BlockLink>()` bytes
+    ///   for reads and writes for `size_of::<BlockLink>()` bytes.
     /// - The memory at `addr` must be unallocated by the associated allocator.
     unsafe fn init_link_at(self, addr: NonZeroUsize, link: BlockLink) {
         unsafe {
