@@ -445,29 +445,27 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator>
             .repeat(sum_of_powers_of_2(levels - 1))
             .unwrap();
 
-        let full_layout = if LEVELS == 1 {
-            // If LEVELS is 1, then no split bitmap is required.
-            buddy_layout
-        } else {
-            // Each level except level (LEVELS - 1) needs one split bit per block.
-            let split_l0_layout = Bitmap::map_layout(num_blocks);
+        if LEVELS == 1 {
+            // There's only one level, so no split bitmap is required.
+            return buddy_layout;
+        }
 
-            // Let K equal the size of a split bitmap for level 0. If LEVELS is:
-            // - 2, then 1 split bitmap is needed of size (2 - 1)K = K.
-            // - 3, then 2 split bitmaps are needed of total size (3 - 1)K + (2 - 1)K = 3K.
-            // - ...
-            // - N, then 2 ^ (N - 2) split bitmaps are needed of total size
-            //   (N - 1)K + (N - 2)K + ... + (2 - 1)K = 2 * (2 ^ (N - 1) - 1) * K
-            //                                        = (sum from x = 1 to (N - 1) of 2^x) * K
-            let split_pow = levels - 1;
+        // Each level except level (LEVELS - 1) needs one split bit per block.
+        let split_l0_layout = Bitmap::map_layout(num_blocks);
 
-            let (split_layout, _) = split_l0_layout
-                .repeat(sum_of_powers_of_2(split_pow))
-                .unwrap();
-            let (full_layout, _) = buddy_layout.extend(split_layout).unwrap();
-
-            full_layout
-        };
+        // Let K equal the size of a split bitmap for level 0. If LEVELS is:
+        // - 2, then 1 split bitmap is needed of size (2 - 1)K = K.
+        // - 3, then 2 split bitmaps are needed of total size (3 - 1)K + (2 - 1)K = 3K.
+        // - ...
+        // - N, then 2 ^ (N - 2) split bitmaps are needed of total size:
+        //
+        //     (N - 1)K + ((N - 1) - 1)K + ... + (2 - 1)K
+        //   = 2 * (2 ^ (N - 1) - 1) * K
+        //   = (sum from x = 1 to (LEVELS - 1) of 2^x) * K
+        let (split_layout, _) = split_l0_layout
+            .repeat(sum_of_powers_of_2(levels - 1))
+            .unwrap();
+        let (full_layout, _) = buddy_layout.extend(split_layout).unwrap();
 
         full_layout
     }
