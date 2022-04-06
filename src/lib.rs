@@ -114,7 +114,7 @@ impl BasePtr {
         self.ptr.with_addr(addr)
     }
 
-    fn with_addr_and_len(self, addr: NonZeroUsize, len: usize) -> NonNull<[u8]> {
+    fn with_addr_and_size(self, addr: NonZeroUsize, len: usize) -> NonNull<[u8]> {
         let ptr = self.ptr.as_ptr().with_addr(addr.get());
         let raw_slice = ptr::slice_from_raw_parts_mut(ptr, len);
 
@@ -131,7 +131,14 @@ impl BasePtr {
     }
 }
 
-/// Types which can be used to provide memory which backs an allocator.
+/// The `AllocError` error indicates an allocation failure that may be due to
+/// resource exhaustion or to something wrong when combining the given input
+/// arguments with this allocator.
+#[cfg(not(feature = "unstable"))]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct AllocError;
+
+/// Types which provide memory which backs an allocator.
 ///
 /// This is a supertrait of [`Allocator`], and is implemented by the following types:
 /// - The `Raw` marker type indicates that an allocator is not backed by another

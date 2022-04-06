@@ -78,9 +78,9 @@ fn allocations_are_mutually_exclusive() {
                     let layout = Layout::array::<u32>(len).unwrap();
 
                     let ptr = unsafe {
-                        let ptr = match alloc.allocate(layout.size()) {
-                            Some(p) => p.as_ptr().cast(),
-                            None => continue,
+                        let ptr = match alloc.allocate(layout) {
+                            Ok(p) => p.as_ptr().cast(),
+                            Err(_) => continue,
                         };
 
                         let slice: &mut [u32] = slice::from_raw_parts_mut(ptr, len);
@@ -177,6 +177,19 @@ fn create_and_destroy() {
 }
 
 #[test]
+fn alloc_empty() {
+    const LEVELS: usize = 4;
+    const MIN_SIZE: usize = 16;
+    const MAX_SIZE: usize = MIN_SIZE << (LEVELS - 1);
+    const NUM_BLOCKS: usize = 8;
+
+    let mut allocator = BuddyAllocator::<MAX_SIZE, LEVELS, Global>::new(NUM_BLOCKS);
+
+    let layout = Layout::from_size_align(0, 1).unwrap();
+    allocator.allocate(layout).unwrap_err();
+}
+
+#[test]
 fn alloc_min_size() {
     const LEVELS: usize = 4;
     const MIN_SIZE: usize = 16;
@@ -185,10 +198,11 @@ fn alloc_min_size() {
 
     let mut allocator = BuddyAllocator::<MAX_SIZE, LEVELS, Global>::new(NUM_BLOCKS);
 
+    let layout = Layout::from_size_align(1, 1).unwrap();
+    let a = allocator.allocate(layout).unwrap();
+    let _b = allocator.allocate(layout).unwrap();
+    let c = allocator.allocate(layout).unwrap();
     unsafe {
-        let a = allocator.allocate(1).unwrap();
-        let _b = allocator.allocate(1).unwrap();
-        let c = allocator.allocate(1).unwrap();
         allocator.deallocate(a.cast());
         allocator.deallocate(c.cast());
     }
@@ -204,13 +218,13 @@ fn alloc_write_and_free() {
     let mut allocator = BuddyAllocator::<MAX_SIZE, LEVELS, Global>::new(NUM_BLOCKS);
 
     unsafe {
-        let size = 64;
-        let ptr: NonNull<u8> = allocator.allocate(size).unwrap().cast();
+        let layout = Layout::from_size_align(64, MIN_SIZE).unwrap();
+        let ptr: NonNull<u8> = allocator.allocate(layout).unwrap().cast();
 
         {
             // Do this in a separate scope so that the slice no longer
             // exists when ptr is freed
-            let buf: &mut [u8] = slice::from_raw_parts_mut(ptr.as_ptr(), size);
+            let buf: &mut [u8] = slice::from_raw_parts_mut(ptr.as_ptr(), layout.size());
             for (i, byte) in buf.iter_mut().enumerate() {
                 *byte = i as u8;
             }
@@ -231,28 +245,31 @@ fn coalesce_one() {
 
     let mut allocator = BuddyAllocator::<MAX_SIZE, LEVELS, Global>::new(NUM_BLOCKS);
 
+    let full_layout = Layout::from_size_align(2 * MIN_SIZE, MIN_SIZE).unwrap();
+    let half_layout = Layout::from_size_align(MIN_SIZE, MIN_SIZE).unwrap();
+
     unsafe {
         // Allocate two minimum-size blocks to split the top block.
-        let a = allocator.allocate(MIN_SIZE).unwrap();
-        let b = allocator.allocate(MIN_SIZE).unwrap();
+        let a = allocator.allocate(half_layout).unwrap();
+        let b = allocator.allocate(half_layout).unwrap();
 
         // Free both blocks, coalescing them.
         allocator.deallocate(a.cast());
         allocator.deallocate(b.cast());
 
         // Allocate the entire region to ensure coalescing worked.
-        let c = allocator.allocate(2 * MIN_SIZE).unwrap();
+        let c = allocator.allocate(full_layout).unwrap();
         allocator.deallocate(c.cast());
 
         // Same as above.
-        let a = allocator.allocate(MIN_SIZE).unwrap();
-        let b = allocator.allocate(MIN_SIZE).unwrap();
+        let a = allocator.allocate(half_layout).unwrap();
+        let b = allocator.allocate(half_layout).unwrap();
 
         // Free both blocks, this time in reverse order.
         allocator.deallocate(a.cast());
         allocator.deallocate(b.cast());
 
-        let c = allocator.allocate(2 * MIN_SIZE).unwrap();
+        let c = allocator.allocate(full_layout).unwrap();
         allocator.deallocate(c.cast());
     }
 }
@@ -268,17 +285,18 @@ fn coalesce_many() {
 
     for lvl in (0..LEVELS).rev() {
         let alloc_size = 2usize.pow((LEVELS - lvl - 1) as u32) * MIN_SIZE;
+        let layout = Layout::from_size_align(alloc_size, MIN_SIZE).unwrap();
         let num_allocs = 2usize.pow(lvl as u32) * NUM_BLOCKS;
 
         let mut allocs = Vec::with_capacity(num_allocs);
         for _ in 0..num_allocs {
-            let ptr = allocator.allocate(alloc_size).unwrap();
+            let ptr = allocator.allocate(layout).unwrap();
 
             {
                 // Do this in a separate scope so that the slice no longer
                 // exists when ptr is freed
                 let buf: &mut [u8] =
-                    unsafe { slice::from_raw_parts_mut(ptr.as_ptr().cast(), alloc_size) };
+                    unsafe { slice::from_raw_parts_mut(ptr.as_ptr().cast(), layout.size()) };
                 for (i, byte) in buf.iter_mut().enumerate() {
                     *byte = (i % 256) as u8;
                 }

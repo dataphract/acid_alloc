@@ -11,6 +11,9 @@ use core::{
 #[cfg(feature = "unstable")]
 use core::alloc::{AllocError, Allocator};
 
+#[cfg(not(feature = "unstable"))]
+use crate::AllocError;
+
 #[cfg(all(any(feature = "alloc", test), feature = "unstable"))]
 use alloc::alloc::Global;
 
@@ -51,23 +54,6 @@ impl BuddyLevel {
     #[inline]
     fn buddy_ofs(&self, block_ofs: usize) -> usize {
         block_ofs ^ self.block_size
-    }
-
-    /// Pops a block from the free list.
-    ///
-    /// If the free list is empty, returns `None`.
-    unsafe fn free_list_pop(&mut self, base: BasePtr) -> Option<NonZeroUsize> {
-        let old_head = self.free_list.take()?;
-
-        unsafe {
-            if let Some(new_head) = base.link_mut(old_head).next {
-                let new_head_mut = base.link_mut(new_head);
-                new_head_mut.prev = None;
-                self.free_list = Some(new_head);
-            }
-        }
-
-        Some(old_head)
     }
 
     /// Pushes a block onto the free list.
@@ -131,11 +117,23 @@ impl BuddyLevel {
     /// Allocates a block from the free list.
     ///
     /// The returned pointer has the provenance of `base`.
-    unsafe fn allocate_one(&mut self, base: BasePtr) -> Option<NonNull<u8>> {
-        let block = unsafe { self.free_list_pop(base)? };
+    unsafe fn allocate_one(&mut self, base: BasePtr, align: usize) -> Option<NonNull<u8>> {
+        let mut current = self.free_list;
+
+        while let Some(cur) = current {
+            if cur.get() % align == 0 {
+                break;
+            }
+
+            current = unsafe { base.link_mut(cur).next };
+        }
+
+        // If current is `Some`, then a suitable block was found.
+        let block = current?;
+
+        unsafe { self.free_list_remove(base, block) };
 
         let ofs = base.offset_to(block);
-
         self.buddies.toggle(self.buddy_bit(ofs));
 
         Some(base.with_addr(block))
@@ -507,22 +505,28 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator>
     /// # Errors
     ///
     /// Returns `None` if a block of `size` bytes could not be allocated.
-    pub fn allocate(&mut self, size: usize) -> Option<NonNull<[u8]>> {
-        if size == 0 {
-            return None;
+    pub fn allocate(&mut self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        if layout.size() == 0 {
+            return Err(AllocError);
         }
 
-        let target_level = self.alloc_level(size)?;
+        let target_level = self.alloc_level(layout.size()).ok_or(AllocError)?;
 
         // If there is a free block of the correct size, return it immediately.
-        if let Some(block) = unsafe { self.levels[target_level].allocate_one(self.base) } {
-            return Some(self.base.with_addr_and_len(block.addr(), size));
+        if let Some(block) =
+            unsafe { self.levels[target_level].allocate_one(self.base, layout.align()) }
+        {
+            return Ok(self.base.with_addr_and_size(block.addr(), layout.size()));
         }
 
         // Otherwise, scan increasing block sizes until a free block is found.
-        let (block, init_level) = (0..target_level).rev().find_map(|level| {
-            unsafe { self.levels[level].allocate_one(self.base) }.map(|blk| (blk, level))
-        })?;
+        let (block, init_level) = (0..target_level)
+            .rev()
+            .find_map(|level| {
+                unsafe { self.levels[level].allocate_one(self.base, layout.align()) }
+                    .map(|blk| (blk, level))
+            })
+            .ok_or(AllocError)?;
 
         let block_ofs = self.base.offset_to(block.addr());
 
@@ -544,7 +548,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator>
         }
 
         // The returned block inherits the provenance of the base pointer.
-        Some(self.base.with_addr_and_len(block.addr(), size))
+        Ok(self.base.with_addr_and_size(block.addr(), layout.size()))
     }
 
     /// Deallocates the memory referenced by `ptr`.

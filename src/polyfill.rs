@@ -3,6 +3,8 @@
 //! The implementations in this module are copied more-or-less verbatim from the
 //! standard library source.
 
+// #![feature(int_log)]
+
 #[cfg(not(feature = "unstable"))]
 pub trait UsizeExt {
     fn log2(self) -> u32;
@@ -16,13 +18,18 @@ impl UsizeExt for usize {
     }
 }
 
+// #![feature(alloc_layout_extra)]
+
 #[cfg(not(feature = "unstable"))]
 use core::alloc::{Layout, LayoutError};
 
 #[cfg(not(feature = "unstable"))]
-pub trait LayoutExt: Sized {
+pub trait LayoutExt {
     fn padding_needed_for(&self, align: usize) -> usize;
-    fn repeat(&self, n: usize) -> Result<(Self, usize), LayoutError>;
+    fn repeat(&self, n: usize) -> Result<(Self, usize), LayoutError>
+    where
+        Self: Sized;
+    fn dangling(&self) -> NonNull<u8>;
 }
 
 #[cfg(not(feature = "unstable"))]
@@ -81,7 +88,21 @@ impl LayoutExt for Layout {
             ))
         }
     }
+
+    #[inline]
+    fn dangling(&self) -> NonNull<u8> {
+        #[cfg(feature = "sptr")]
+        use sptr::invalid_mut;
+
+        #[cfg(all(feature = "unstable", not(feature = "sptr")))]
+        use core::ptr::invalid_mut;
+
+        // SAFETY: align is guaranteed to be non-zero
+        unsafe { NonNull::new_unchecked(invalid_mut::<u8>(self.align())) }
+    }
 }
+
+// #![feature(strict_provenance)]
 
 #[cfg(feature = "sptr")]
 use core::{num::NonZeroUsize, ptr::NonNull};
