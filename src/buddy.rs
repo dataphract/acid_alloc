@@ -1,4 +1,22 @@
 //! A binary-buddy memory allocator.
+//!
+//! The buddy algorithm divides the managed region into a sequence of
+//! uniformly-sized blocks. Each of these blocks can be recursively split in
+//! half a fixed number of times in order to provide finer-grained allocations.
+//! The buddy allocator excels in cases where most allocations have a
+//! power-of-two size and have `size >= alignment`.
+//!
+//! ## Characteristics
+//!
+//! This allocator has the following desirable characteristics:
+//! - Best-case O(1) allocation and deallocation
+//! - Worst-case O(log<sub>2</sub>_levels_) allocation when `size >= alignment`
+//! - Worst-case O(log<sub>2</sub>_levels_) deallocation
+//! - Limited external fragmentation
+//!
+//! However, it also has some drawbacks:
+//! - Worst-case O(N) allocation when `size < alignment`
+//! - Up to 50% internal fragmentation
 
 #![cfg(any(feature = "sptr", feature = "unstable"))]
 
@@ -268,6 +286,9 @@ impl BuddyLevel {
 
 /// A binary-buddy allocator.
 ///
+/// For a discussion of the buddy algorithm, see the [module-level
+/// documentation].
+///
 /// This takes two const parameters:
 /// - `BLK_SIZE` is the size of the largest allocations the allocator can make.
 /// - `LEVELS` is the number of levels in the allocator.
@@ -292,6 +313,8 @@ impl BuddyLevel {
 /// type CustomBuddyAllocator<A> = BuddyAllocator<4096, 9, A>;
 /// # fn main() {}
 /// ```
+///
+/// [module-level documentation]: crate::buddy
 pub struct BuddyAllocator<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> {
     /// Pointer to the region managed by this allocator.
     base: BasePtr,
