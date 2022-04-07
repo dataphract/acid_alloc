@@ -64,7 +64,7 @@ fn allocations_are_mutually_exclusive() {
     // 16 to 1024.
     const LEVELS: usize = 7;
     const MIN_SIZE: usize = 16;
-    const MAX_SIZE: usize = MIN_SIZE << (LEVELS - 1);
+    const BLK_SIZE: usize = MIN_SIZE << (LEVELS - 1);
     const BLOCKS: usize = 16;
 
     fn prop<const BLK_SIZE: usize, const LEVELS: usize>(ops: Vec<AllocatorOp>) -> bool {
@@ -120,37 +120,26 @@ fn allocations_are_mutually_exclusive() {
     }
 
     let mut qc = QuickCheck::new();
-    qc.quickcheck(prop::<MAX_SIZE, LEVELS> as fn(_) -> bool);
+    qc.quickcheck(prop::<BLK_SIZE, LEVELS> as fn(_) -> bool);
 }
 
 #[test]
 #[should_panic]
 fn zero_levels_panics() {
-    const LEVELS: usize = 0;
-    const BLK_SIZE: usize = 256;
-    const NUM_BLOCKS: usize = 8;
-
-    let _ = BuddyAllocator::<BLK_SIZE, LEVELS, Global>::new(NUM_BLOCKS);
+    let _ = BuddyAllocator::<256, 0, Global>::new(8);
 }
 
 #[test]
 #[should_panic]
 fn too_many_levels_panics() {
     const LEVELS: usize = usize::BITS as usize;
-    const BLK_SIZE: usize = 256;
-    const NUM_BLOCKS: usize = 8;
-
-    let _ = BuddyAllocator::<BLK_SIZE, LEVELS, Global>::new(NUM_BLOCKS);
+    let _ = BuddyAllocator::<256, LEVELS, Global>::new(8);
 }
 
 #[test]
 #[should_panic]
 fn non_power_of_two_block_size_panics() {
-    const LEVELS: usize = usize::BITS as usize;
-    const BLK_SIZE: usize = 255;
-    const NUM_BLOCKS: usize = 8;
-
-    let _ = BuddyAllocator::<BLK_SIZE, LEVELS, Global>::new(NUM_BLOCKS);
+    let _ = BuddyAllocator::<255, 4, Global>::new(8);
 }
 
 #[test]
@@ -169,10 +158,10 @@ fn create_and_destroy() {
     // These parameters give a maximum block size of 1KiB and a total size of 8KiB.
     const LEVELS: usize = 8;
     const MIN_SIZE: usize = 16;
-    const MAX_SIZE: usize = MIN_SIZE << (LEVELS - 1);
+    const BLK_SIZE: usize = MIN_SIZE << (LEVELS - 1);
     const NUM_BLOCKS: usize = 8;
 
-    let allocator = BuddyAllocator::<MAX_SIZE, LEVELS, Global>::new(NUM_BLOCKS);
+    let allocator = BuddyAllocator::<BLK_SIZE, LEVELS, Global>::new(NUM_BLOCKS);
     drop(allocator);
 }
 
@@ -180,10 +169,10 @@ fn create_and_destroy() {
 fn alloc_empty() {
     const LEVELS: usize = 4;
     const MIN_SIZE: usize = 16;
-    const MAX_SIZE: usize = MIN_SIZE << (LEVELS - 1);
+    const BLK_SIZE: usize = MIN_SIZE << (LEVELS - 1);
     const NUM_BLOCKS: usize = 8;
 
-    let mut allocator = BuddyAllocator::<MAX_SIZE, LEVELS, Global>::new(NUM_BLOCKS);
+    let mut allocator = BuddyAllocator::<BLK_SIZE, LEVELS, Global>::new(NUM_BLOCKS);
 
     let layout = Layout::from_size_align(0, 1).unwrap();
     allocator.allocate(layout).unwrap_err();
@@ -193,10 +182,10 @@ fn alloc_empty() {
 fn alloc_min_size() {
     const LEVELS: usize = 4;
     const MIN_SIZE: usize = 16;
-    const MAX_SIZE: usize = MIN_SIZE << (LEVELS - 1);
+    const BLK_SIZE: usize = MIN_SIZE << (LEVELS - 1);
     const NUM_BLOCKS: usize = 8;
 
-    let mut allocator = BuddyAllocator::<MAX_SIZE, LEVELS, Global>::new(NUM_BLOCKS);
+    let mut allocator = BuddyAllocator::<BLK_SIZE, LEVELS, Global>::new(NUM_BLOCKS);
 
     let layout = Layout::from_size_align(1, 1).unwrap();
     let a = allocator.allocate(layout).unwrap();
@@ -212,10 +201,10 @@ fn alloc_min_size() {
 fn alloc_write_and_free() {
     const LEVELS: usize = 8;
     const MIN_SIZE: usize = 16;
-    const MAX_SIZE: usize = MIN_SIZE << (LEVELS - 1);
+    const BLK_SIZE: usize = MIN_SIZE << (LEVELS - 1);
     const NUM_BLOCKS: usize = 8;
 
-    let mut allocator = BuddyAllocator::<MAX_SIZE, LEVELS, Global>::new(NUM_BLOCKS);
+    let mut allocator = BuddyAllocator::<BLK_SIZE, LEVELS, Global>::new(NUM_BLOCKS);
 
     unsafe {
         let layout = Layout::from_size_align(64, MIN_SIZE).unwrap();
@@ -240,10 +229,10 @@ fn coalesce_one() {
     // splittable top-level block.
     const LEVELS: usize = 2;
     const MIN_SIZE: usize = 16;
-    const MAX_SIZE: usize = MIN_SIZE << (LEVELS - 1);
+    const BLK_SIZE: usize = MIN_SIZE << (LEVELS - 1);
     const NUM_BLOCKS: usize = 1;
 
-    let mut allocator = BuddyAllocator::<MAX_SIZE, LEVELS, Global>::new(NUM_BLOCKS);
+    let mut allocator = BuddyAllocator::<BLK_SIZE, LEVELS, Global>::new(NUM_BLOCKS);
 
     let full_layout = Layout::from_size_align(2 * MIN_SIZE, MIN_SIZE).unwrap();
     let half_layout = Layout::from_size_align(MIN_SIZE, MIN_SIZE).unwrap();
@@ -278,10 +267,10 @@ fn coalesce_one() {
 fn coalesce_many() {
     const LEVELS: usize = 4;
     const MIN_SIZE: usize = 16;
-    const MAX_SIZE: usize = MIN_SIZE << (LEVELS - 1);
+    const BLK_SIZE: usize = MIN_SIZE << (LEVELS - 1);
     const NUM_BLOCKS: usize = 8;
 
-    let mut allocator = BuddyAllocator::<MAX_SIZE, LEVELS, Global>::new(NUM_BLOCKS);
+    let mut allocator = BuddyAllocator::<BLK_SIZE, LEVELS, Global>::new(NUM_BLOCKS);
 
     for lvl in (0..LEVELS).rev() {
         let alloc_size = 2usize.pow((LEVELS - lvl - 1) as u32) * MIN_SIZE;

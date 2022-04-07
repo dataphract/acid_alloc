@@ -21,7 +21,10 @@ impl UsizeExt for usize {
 // #![feature(alloc_layout_extra)]
 
 #[cfg(not(feature = "unstable"))]
-use core::alloc::{Layout, LayoutError};
+use core::{
+    alloc::{Layout, LayoutError},
+    ptr::NonNull,
+};
 
 #[cfg(not(feature = "unstable"))]
 pub trait LayoutExt {
@@ -105,7 +108,7 @@ impl LayoutExt for Layout {
 // #![feature(strict_provenance)]
 
 #[cfg(feature = "sptr")]
-use core::{num::NonZeroUsize, ptr::NonNull};
+use core::num::NonZeroUsize;
 
 #[cfg(feature = "sptr")]
 use sptr::Strict;

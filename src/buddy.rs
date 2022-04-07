@@ -1,3 +1,5 @@
+//! A binary-buddy memory allocator.
+
 #![cfg(any(feature = "sptr", feature = "unstable"))]
 
 use core::{
@@ -7,6 +9,72 @@ use core::{
     num::NonZeroUsize,
     ptr::NonNull,
 };
+
+/// Declares and implements `Allocator` for wrappers around an allocator.
+///
+/// If the "unstable" feature is not enabled, this is a no-op.
+macro_rules! declare_wrappers {
+    ($($(#[$attr:meta])* $wrapper:ident uses $typename:ident via $method:path)*) => {
+        $(
+            #[doc = concat!("A `BuddyAllocator` wrapped by a `", stringify!($typename), "`.")]
+            ///
+            /// This type implements [`Allocator`].
+            #[cfg(feature = "unstable")]
+            $(#[$attr])*
+            pub struct $wrapper<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator>
+            {
+                inner: $typename<BuddyAllocator<BLK_SIZE, LEVELS, A>>,
+            }
+
+            #[cfg(feature = "unstable")]
+            impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> $wrapper<BLK_SIZE, LEVELS, A>
+            {
+                /// Returns a reference to the inner wrapper.
+                pub fn inner(&self) -> &$typename<BuddyAllocator<BLK_SIZE, LEVELS, A>> {
+                    &self.inner
+                }
+            }
+
+            // SAFETY:
+            //
+            // See https://doc.rust-lang.org/nightly/core/alloc/trait.Allocator.html#safety.
+            //
+            // - Allocated blocks point to memory owned by the `BuddyAllocator` and are
+            //   valid until it is dropped.
+            // - `BuddyAllocator` is not `Clone`, and moving it does not invalidate
+            //   allocated memory because that memory is behind a pointer.
+            // - Any pointer to a currently allocated block is safe to deallocate.
+            #[cfg(feature = "unstable")]
+            #[cfg_attr(docs_rs, doc(cfg(feature = "unstable")))]
+            unsafe impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> Allocator
+                for $wrapper<BLK_SIZE, LEVELS, A>
+            {
+                fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+                    $method(&self.inner).allocate(layout)
+                }
+
+                unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+                    let _ = layout;
+
+                    unsafe { $method(&self.inner).deallocate(ptr) }
+                }
+            }
+        )*
+    };
+}
+
+declare_wrappers! {
+    RefCellBuddyAllocator uses RefCell via RefCell::borrow_mut
+}
+
+#[cfg(feature = "std")]
+declare_wrappers! {
+    #[cfg_attr(docs_rs, doc(cfg(feature = "std")))]
+    MutexBuddyAllocator uses Mutex via Mutex::lock
+
+    #[cfg_attr(docs_rs, doc(cfg(feature = "std")))]
+    RwLockBuddyAllocator uses RwLock via RwLock::write
+}
 
 #[cfg(feature = "unstable")]
 use core::alloc::{AllocError, Allocator};
@@ -257,6 +325,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> BuddyAllocator<BLK_SIZE, LEVELS
     /// If allocation fails, this constructor invokes [`handle_alloc_error`].
     ///
     /// [`handle_alloc_error`]: alloc::alloc::handle_alloc_error
+    #[cfg_attr(docs_rs, doc(cfg(feature = "alloc")))]
     pub fn new(num_blocks: usize) -> BuddyAllocator<BLK_SIZE, LEVELS, Global> {
         let region_layout = Self::region_layout(num_blocks);
         let metadata_layout = Self::metadata_layout(num_blocks);
@@ -290,6 +359,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> BuddyAllocator<BLK_SIZE, LEVELS
     /// If allocation fails, this constructor invokes [`handle_alloc_error`].
     ///
     /// [`handle_alloc_error`]: alloc::alloc::handle_alloc_error
+    #[cfg_attr(docs_rs, doc(cfg(feature = "alloc")))]
     pub fn new(num_blocks: usize) -> BuddyAllocator<BLK_SIZE, LEVELS, Global> {
         BuddyAllocator::<BLK_SIZE, LEVELS, Global>::new_in(num_blocks, Global)
             .expect("global allocation failed")
@@ -303,6 +373,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: Allocator> BuddyAllocator<BL
     /// # Errors
     ///
     /// If allocation fails, returns `Err(AllocError)`.
+    #[cfg_attr(docs_rs, doc(cfg(feature = "unstable")))]
     pub fn new_in(
         num_blocks: usize,
         allocator: A,
@@ -493,13 +564,15 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator>
 
     /// Attempts to allocate a block of memory.
     ///
-    /// On success, returns a [`NonNull<[u8]>`][NonNull] of `size` bytes.
+    /// On success, returns a [`NonNull<[u8]>`] which satisfies `layout`.
     ///
     /// The contents of the block are uninitialized.
     ///
     /// # Errors
     ///
-    /// Returns `None` if a block of `size` bytes could not be allocated.
+    /// Returns `Err` if a suitable block could not be allocated.
+    ///
+    /// [`NonNull<[u8]: NonNull
     pub fn allocate(&mut self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         if layout.size() == 0 {
             return Err(AllocError);
@@ -547,6 +620,9 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator>
     }
 
     /// Deallocates the memory referenced by `ptr`.
+    ///
+    /// This is equivalent to `Self::deallocate()`, but without the `Layout`
+    /// parameter.
     ///
     /// # Safety
     ///
@@ -604,6 +680,12 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator>
         (base.ptr, metadata)
     }
 }
+
+#[cfg(all(feature = "unstable"))]
+use core::cell::RefCell;
+
+#[cfg(all(feature = "unstable", feature = "std"))]
+use std::sync::{Mutex, RwLock};
 
 /// Like a `BuddyAllocator`, but without a `Drop` impl or an associated
 /// allocator.

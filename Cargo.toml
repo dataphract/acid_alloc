@@ -1,11 +1,22 @@
 [package]
 name = "acid_alloc"
+authors = ["dataphract <dataphract@gmail.com>"]
 version = "0.1.0"
 edition = "2021"
+description = "Bare metal-friendly allocators"
+readme = "README.md"
+repository = "https://github.com/dataphract/acid_alloc"
+license = "MIT OR Apache-2.0"
+keywords = ["allocator", "no_std"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docs_rs"]
 
 [features]
 default = ["sptr"]
 
+std = ["alloc"]
 alloc = []
 
 # Enables nightly-only unstable Rust features.
