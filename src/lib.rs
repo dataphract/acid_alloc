@@ -1,5 +1,6 @@
 //! Bare metal-friendly allocators.
 
+#![warn(missing_debug_implementations)]
 #![warn(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![cfg_attr(not(feature = "std"), no_std)]
@@ -26,7 +27,7 @@ macro_rules! requires_sptr_or_unstable {
 }
 
 #[cfg(not(any(feature = "sptr", feature = "unstable")))]
-compile_error!("Either the \"sptr\" or \"unstable\" feature must be enabled.");
+compile_error!("At least one of these crate features must be enabled: [\"sptr\", \"unstable\"].");
 
 #[cfg(any(feature = "alloc", test))]
 extern crate alloc;
@@ -53,6 +54,25 @@ requires_sptr_or_unstable! {
 
     #[cfg(not(feature = "unstable"))]
     use crate::polyfill::*;
+
+    /// The error type for allocator constructors.
+    #[derive(Clone, Debug)]
+    pub enum AllocInitError {
+        /// A necessary allocation failed.
+        ///
+        /// This variant is returned when a constructor attempts to allocate
+        /// memory, either for metadata or the managed region, but the
+        /// underlying allocator fails.
+        ///
+        /// The variant contains the [`Layout`] that could not be allocated.
+        AllocFailed(Layout),
+
+        /// The configuration of the allocator is invalid.
+        ///
+        /// This variant is returned when an allocator's configuration
+        /// parameters are impossible to satisfy.
+        InvalidConfig,
+    }
 
     /// A pointer to the base of the region of memory managed by an allocator.
     #[derive(Copy, Clone, Debug)]
@@ -138,72 +158,74 @@ requires_sptr_or_unstable! {
         prev: Option<NonZeroUsize>,
         next: Option<NonZeroUsize>,
     }
-}
 
-/// Indicates an allocation failure due to resource exhaustion or an unsupported
-/// set of arguments.
-#[cfg(not(feature = "unstable"))]
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub struct AllocError;
+    /// Indicates an allocation failure due to resource exhaustion or an unsupported
+    /// set of arguments.
+    #[cfg(not(feature = "unstable"))]
+    #[derive(Copy, Clone, PartialEq, Eq, Debug)]
+    pub struct AllocError;
 
-/// Types which provide memory which backs an allocator.
-///
-/// This is a supertrait of [`Allocator`], and is implemented by the following types:
-/// - The `Raw` marker type indicates that an allocator is not backed by another
-///   allocator. This is the case when constructing the allocator from raw
-///   pointers. Memory used by this allocator can be reclaimed using
-///   `.into_raw_parts()`.
-/// - The `Global` marker type indicates that an allocator is backed by the
-///   global allocator. The allocator will free its memory on drop.
-/// - Any type `A` which implements [`Allocator`] indicates that an allocator is
-///   backed by an instance of `A`. The allocator will free its memory on drop.
-///
-/// [`Allocator`]: https://doc.rust-lang.org/stable/core/alloc/trait.Allocator.html
-pub trait BackingAllocator: Sealed {
-    /// Deallocates the memory referenced by `ptr`.
+    /// Types which provide memory which backs an allocator.
     ///
-    /// # Safety
+    /// This is a supertrait of [`Allocator`], and is implemented by the following types:
+    /// - The `Raw` marker type indicates that an allocator is not backed by another
+    ///   allocator. This is the case when constructing the allocator from raw
+    ///   pointers. Memory used by this allocator can be reclaimed using
+    ///   `.into_raw_parts()`.
+    /// - The `Global` marker type indicates that an allocator is backed by the
+    ///   global allocator. The allocator will free its memory on drop.
+    /// - Any type `A` which implements [`Allocator`] indicates that an allocator is
+    ///   backed by an instance of `A`. The allocator will free its memory on drop.
     ///
-    /// * `ptr` must denote a block of memory [*currently allocated*] via this allocator, and
-    /// * `layout` must [*fit*] that block of memory.
-    ///
-    /// [*currently allocated*]: https://doc.rust-lang.org/nightly/alloc/alloc/trait.Allocator.html#currently-allocated-memory
-    /// [*fit*]: https://doc.rust-lang.org/nightly/alloc/alloc/trait.Allocator.html#memory-fitting
-    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout);
-}
-
-/// A marker type indicating that an allocator is backed by raw pointers.
-pub struct Raw;
-impl Sealed for Raw {}
-impl BackingAllocator for Raw {
-    unsafe fn deallocate(&self, _: NonNull<u8>, _: Layout) {}
-}
-
-#[cfg(all(any(feature = "alloc", test), not(feature = "unstable")))]
-/// The global memory allocator.
-pub struct Global;
-
-#[cfg(all(any(feature = "alloc", test), not(feature = "unstable")))]
-impl Sealed for Global {}
-
-#[cfg(all(any(feature = "alloc", test), not(feature = "unstable")))]
-impl BackingAllocator for Global {
-    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
-        unsafe { alloc::alloc::dealloc(ptr.as_ptr(), layout) };
+    /// [`Allocator`]: https://doc.rust-lang.org/stable/core/alloc/trait.Allocator.html
+    pub trait BackingAllocator: Sealed {
+        /// Deallocates the memory referenced by `ptr`.
+        ///
+        /// # Safety
+        ///
+        /// * `ptr` must denote a block of memory [*currently allocated*] via this allocator, and
+        /// * `layout` must [*fit*] that block of memory.
+        ///
+        /// [*currently allocated*]: https://doc.rust-lang.org/nightly/alloc/alloc/trait.Allocator.html#currently-allocated-memory
+        /// [*fit*]: https://doc.rust-lang.org/nightly/alloc/alloc/trait.Allocator.html#memory-fitting
+        unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout);
     }
-}
 
-#[cfg(feature = "unstable")]
-impl<A: Allocator> Sealed for A {}
-#[cfg(feature = "unstable")]
-impl<A: Allocator> BackingAllocator for A {
-    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
-        unsafe { Allocator::deallocate(self, ptr, layout) };
+    /// A marker type indicating that an allocator is backed by raw pointers.
+    #[derive(Clone, Debug)]
+    pub struct Raw;
+    impl Sealed for Raw {}
+    impl BackingAllocator for Raw {
+        unsafe fn deallocate(&self, _: NonNull<u8>, _: Layout) {}
     }
-}
 
-#[doc(hidden)]
-mod private {
-    pub trait Sealed {}
+    #[cfg(all(any(feature = "alloc", test), not(feature = "unstable")))]
+    /// The global memory allocator.
+    #[derive(Clone, Debug)]
+    pub struct Global;
+
+    #[cfg(all(any(feature = "alloc", test), not(feature = "unstable")))]
+    impl Sealed for Global {}
+
+    #[cfg(all(any(feature = "alloc", test), not(feature = "unstable")))]
+    impl BackingAllocator for Global {
+        unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+            unsafe { alloc::alloc::dealloc(ptr.as_ptr(), layout) };
+        }
+    }
+
+    #[cfg(feature = "unstable")]
+    impl<A: Allocator> Sealed for A {}
+    #[cfg(feature = "unstable")]
+    impl<A: Allocator> BackingAllocator for A {
+        unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+            unsafe { Allocator::deallocate(self, ptr, layout) };
+        }
+    }
+
+    #[doc(hidden)]
+    mod private {
+        pub trait Sealed {}
+    }
+    use private::Sealed;
 }
-use private::Sealed;

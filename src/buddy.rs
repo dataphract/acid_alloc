@@ -4,7 +4,7 @@
 
 use core::{
     alloc::Layout,
-    cmp,
+    cmp, fmt,
     mem::{self, MaybeUninit},
     num::NonZeroUsize,
     ptr::NonNull,
@@ -14,12 +14,13 @@ use core::{
 ///
 /// If the "unstable" feature is not enabled, this is a no-op.
 macro_rules! declare_wrappers {
-    ($($(#[$attr:meta])* $wrapper:ident uses $typename:ident via $method:path)*) => {
+    ($($(#[$attr:meta])* $wrapper:ident uses $typename:ident via $inner:ident : $ex:expr;)*) => {
         $(
             #[doc = concat!("A `BuddyAllocator` wrapped by a `", stringify!($typename), "`.")]
             ///
             /// This type implements [`Allocator`].
             #[cfg(feature = "unstable")]
+            #[derive(Debug)]
             $(#[$attr])*
             pub struct $wrapper<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator>
             {
@@ -50,30 +51,46 @@ macro_rules! declare_wrappers {
                 for $wrapper<BLK_SIZE, LEVELS, A>
             {
                 fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
-                    $method(&self.inner).allocate(layout)
+                    let $inner = &self.inner;
+
+                    $ex.allocate(layout)
                 }
 
                 unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
                     let _ = layout;
 
-                    unsafe { $method(&self.inner).deallocate(ptr) }
+                    let $inner = &self.inner;
+
+                    unsafe { $ex.deallocate(ptr) }
                 }
             }
         )*
     };
 }
 
+#[cfg(all(feature = "unstable"))]
+use core::cell::RefCell;
+
 declare_wrappers! {
-    RefCellBuddyAllocator uses RefCell via RefCell::borrow_mut
+    RefCellBuddyAllocator
+        uses RefCell
+        via inner: inner.borrow_mut();
 }
+
+#[cfg(all(feature = "unstable", feature = "std"))]
+use std::sync::{Mutex as StdMutex, RwLock as StdRwLock};
 
 #[cfg(feature = "std")]
 declare_wrappers! {
     #[cfg_attr(docs_rs, doc(cfg(feature = "std")))]
-    MutexBuddyAllocator uses Mutex via Mutex::lock
+    StdMutexBuddyAllocator
+        uses StdMutex
+        via inner: inner.lock().unwrap();
 
     #[cfg_attr(docs_rs, doc(cfg(feature = "std")))]
-    RwLockBuddyAllocator uses RwLock via RwLock::write
+    StdRwLockBuddyAllocator
+        uses StdRwLock
+        via inner: inner.write().unwrap();
 }
 
 #[cfg(feature = "unstable")]
@@ -85,7 +102,7 @@ use crate::AllocError;
 #[cfg(all(any(feature = "alloc", test), feature = "unstable"))]
 use alloc::alloc::Global;
 
-use crate::{bitmap::Bitmap, BackingAllocator, BasePtr, BlockLink, Raw};
+use crate::{bitmap::Bitmap, AllocInitError, BackingAllocator, BasePtr, BlockLink, Raw};
 
 #[cfg(not(feature = "unstable"))]
 use crate::polyfill::*;
@@ -114,7 +131,8 @@ impl BuddyLevel {
     /// `block_ofs` bytes from the base.
     #[inline]
     fn buddy_bit(&self, block_ofs: usize) -> usize {
-        self.index_of(block_ofs).checked_div(2).unwrap()
+        // Safe unchecked division: divisor is nonzero
+        self.index_of(block_ofs) / 2
     }
 
     /// Retrieves the offset of the buddy of the block which starts
@@ -137,7 +155,7 @@ impl BuddyLevel {
 
         let old_head = self.free_list;
 
-        // If `old_head` exists, it points back to `new_head`.
+        // If `old_head` exists, it now points back to `new_head`.
 
         unsafe {
             base.init_link_at(
@@ -149,8 +167,9 @@ impl BuddyLevel {
             )
         };
 
-        // `new_head` points forward to `old_head`.
-        // `old_head` points back to `new_head`.
+        // `new_head` now points forward to `old_head`.
+        // `old_head` now points back to `new_head`.
+
         self.free_list = Some(new_head);
     }
 
@@ -301,6 +320,11 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> BuddyAllocator<BLK_SIZE, LEVELS
     ///   valid for reads and writes for the entire size indicated by that
     ///   `Layout`.
     ///
+    ///  # Errors
+    ///
+    ///  This constructor returns an error if the allocator configuration is
+    ///  invalid.
+    ///
     /// [`Self::region_layout(num_blocks)`]: Self::region_layout
     /// [`Self::metadata_layout(num_blocks)`]: Self::metadata_layout
     /// [`Layout`]: core::alloc::Layout
@@ -308,51 +332,50 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> BuddyAllocator<BLK_SIZE, LEVELS
         metadata: NonNull<u8>,
         region: NonNull<u8>,
         num_blocks: usize,
-    ) -> BuddyAllocator<BLK_SIZE, LEVELS, Raw> {
+    ) -> Result<BuddyAllocator<BLK_SIZE, LEVELS, Raw>, AllocInitError> {
         unsafe {
-            BuddyAllocatorParts::<BLK_SIZE, LEVELS>::new(metadata, region, num_blocks)
-                .with_backing_allocator(Raw)
+            RawBuddyAllocator::<BLK_SIZE, LEVELS>::try_new(metadata, region, num_blocks)
+                .map(|p| p.with_backing_allocator(Raw))
         }
     }
 }
 
 #[cfg(all(any(feature = "alloc", test), not(feature = "unstable")))]
 impl<const BLK_SIZE: usize, const LEVELS: usize> BuddyAllocator<BLK_SIZE, LEVELS, Global> {
-    /// Constructs a new `BuddyAllocator` backed by the global allocator.
+    /// Attempts to construct a new `BuddyAllocator` backed by the global allocator.
     ///
     /// # Errors
     ///
-    /// If allocation fails, this constructor invokes [`handle_alloc_error`].
-    ///
-    /// [`handle_alloc_error`]: alloc::alloc::handle_alloc_error
-    #[cfg_attr(docs_rs, doc(cfg(feature = "alloc")))]
-    pub fn new(num_blocks: usize) -> BuddyAllocator<BLK_SIZE, LEVELS, Global> {
+    /// If allocation fails, returns `Err(AllocError)`.
+    pub fn try_new(
+        num_blocks: usize,
+    ) -> Result<BuddyAllocator<BLK_SIZE, LEVELS, Global>, AllocInitError> {
         let region_layout = Self::region_layout(num_blocks);
         let metadata_layout = Self::metadata_layout(num_blocks);
 
         unsafe {
             let region_ptr = {
                 let raw = alloc::alloc::alloc(region_layout);
-                NonNull::new(raw).unwrap_or_else(|| alloc::alloc::handle_alloc_error(region_layout))
+                NonNull::new(raw).ok_or(AllocInitError::AllocFailed(region_layout))?
             };
 
             let metadata_ptr = {
                 let raw = alloc::alloc::alloc(metadata_layout);
-                NonNull::new(raw).unwrap_or_else(|| {
+                NonNull::new(raw).ok_or_else(|| {
                     alloc::alloc::dealloc(region_ptr.as_ptr(), region_layout);
-                    alloc::alloc::handle_alloc_error(metadata_layout)
-                })
+                    AllocInitError::AllocFailed(metadata_layout)
+                })?
             };
 
-            BuddyAllocatorParts::<BLK_SIZE, LEVELS>::new(metadata_ptr, region_ptr, num_blocks)
-                .with_backing_allocator(Global)
+            RawBuddyAllocator::<BLK_SIZE, LEVELS>::try_new(metadata_ptr, region_ptr, num_blocks)
+                .map(|p| p.with_backing_allocator(Global))
         }
     }
 }
 
 #[cfg(all(any(feature = "alloc", test), feature = "unstable"))]
 impl<const BLK_SIZE: usize, const LEVELS: usize> BuddyAllocator<BLK_SIZE, LEVELS, Global> {
-    /// Constructs a new `BuddyAllocator` backed by the global allocator.
+    /// Attempts to construct a new `BuddyAllocator` backed by the global allocator.
     ///
     /// # Errors
     ///
@@ -360,35 +383,45 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> BuddyAllocator<BLK_SIZE, LEVELS
     ///
     /// [`handle_alloc_error`]: alloc::alloc::handle_alloc_error
     #[cfg_attr(docs_rs, doc(cfg(feature = "alloc")))]
-    pub fn new(num_blocks: usize) -> BuddyAllocator<BLK_SIZE, LEVELS, Global> {
-        BuddyAllocator::<BLK_SIZE, LEVELS, Global>::new_in(num_blocks, Global)
-            .expect("global allocation failed")
+    pub fn try_new(
+        num_blocks: usize,
+    ) -> Result<BuddyAllocator<BLK_SIZE, LEVELS, Global>, AllocInitError> {
+        BuddyAllocator::<BLK_SIZE, LEVELS, Global>::try_new_in_impl(num_blocks, Global)
     }
 }
 
 #[cfg(feature = "unstable")]
 impl<const BLK_SIZE: usize, const LEVELS: usize, A: Allocator> BuddyAllocator<BLK_SIZE, LEVELS, A> {
-    /// Constructs a new `BuddyAllocator` backed by `allocator`.
+    /// Attempts to construct a new `BuddyAllocator` backed by `allocator`.
     ///
     /// # Errors
     ///
     /// If allocation fails, returns `Err(AllocError)`.
     #[cfg_attr(docs_rs, doc(cfg(feature = "unstable")))]
-    pub fn new_in(
+    pub fn try_new_in(
         num_blocks: usize,
         allocator: A,
-    ) -> Result<BuddyAllocator<BLK_SIZE, LEVELS, A>, AllocError> {
+    ) -> Result<BuddyAllocator<BLK_SIZE, LEVELS, A>, AllocInitError> {
+        Self::try_new_in_impl(num_blocks, allocator)
+    }
+
+    fn try_new_in_impl(
+        num_blocks: usize,
+        allocator: A,
+    ) -> Result<BuddyAllocator<BLK_SIZE, LEVELS, A>, AllocInitError> {
         let region_layout = Self::region_layout(num_blocks);
         let metadata_layout = Self::metadata_layout(num_blocks);
 
-        let region = allocator.allocate(region_layout)?;
+        let region = allocator
+            .allocate(region_layout)
+            .map_err(|_| AllocInitError::AllocFailed(region_layout))?;
         let metadata = match allocator.allocate(metadata_layout) {
             Ok(m) => m,
-            Err(e) => unsafe {
+            Err(_) => unsafe {
                 // SAFETY: region was received as NonNull via Allocator::allocate
                 let region_ptr = NonNull::new_unchecked(region.as_ptr() as *mut u8);
                 allocator.deallocate(region_ptr, region_layout);
-                return Err(e);
+                return Err(AllocInitError::AllocFailed(metadata_layout));
             },
         };
 
@@ -397,28 +430,8 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: Allocator> BuddyAllocator<BL
             let region_ptr = NonNull::new_unchecked(region.as_ptr() as *mut u8);
             let metadata_ptr = NonNull::new_unchecked(metadata.as_ptr() as *mut u8);
 
-            Ok(
-                BuddyAllocatorParts::<BLK_SIZE, LEVELS>::new(metadata_ptr, region_ptr, num_blocks)
-                    .with_backing_allocator(allocator),
-            )
-        }
-    }
-}
-
-impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> Drop
-    for BuddyAllocator<BLK_SIZE, LEVELS, A>
-{
-    fn drop(&mut self) {
-        let region = self.base.ptr;
-        let metadata = self.metadata;
-        let num_blocks = self.num_blocks;
-
-        let region_layout = Self::region_layout(num_blocks);
-        let metadata_layout = Self::metadata_layout(num_blocks);
-
-        unsafe {
-            self.backing_allocator.deallocate(region, region_layout);
-            self.backing_allocator.deallocate(metadata, metadata_layout);
+            RawBuddyAllocator::<BLK_SIZE, LEVELS>::try_new(metadata_ptr, region_ptr, num_blocks)
+                .map(|p| p.with_backing_allocator(allocator))
         }
     }
 }
@@ -452,10 +465,6 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator>
 
     /// Returns the layout requirements of the region managed by an allocator of
     /// this type.
-    ///
-    /// # Panics
-    ///
-    /// This function panics if the
     pub fn region_layout(num_blocks: usize) -> Layout {
         let min_block_size = Self::min_block_size();
         let levels: u32 = LEVELS.try_into().unwrap();
@@ -572,7 +581,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator>
     ///
     /// Returns `Err` if a suitable block could not be allocated.
     ///
-    /// [`NonNull<[u8]: NonNull
+    /// [`NonNull<[u8]>`]: NonNull
     pub fn allocate(&mut self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         if layout.size() == 0 {
             return Err(AllocError);
@@ -681,30 +690,54 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator>
     }
 }
 
-#[cfg(all(feature = "unstable"))]
-use core::cell::RefCell;
+impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> fmt::Debug
+    for BuddyAllocator<BLK_SIZE, LEVELS, A>
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BuddyAllocator")
+            .field("metadata", &self.metadata)
+            .field("base", &self.base.ptr)
+            .field("num_blocks", &self.num_blocks)
+            .finish()
+    }
+}
 
-#[cfg(all(feature = "unstable", feature = "std"))]
-use std::sync::{Mutex, RwLock};
+impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> Drop
+    for BuddyAllocator<BLK_SIZE, LEVELS, A>
+{
+    fn drop(&mut self) {
+        let region = self.base.ptr;
+        let metadata = self.metadata;
+        let num_blocks = self.num_blocks;
+
+        let region_layout = Self::region_layout(num_blocks);
+        let metadata_layout = Self::metadata_layout(num_blocks);
+
+        unsafe {
+            self.backing_allocator.deallocate(region, region_layout);
+            self.backing_allocator.deallocate(metadata, metadata_layout);
+        }
+    }
+}
 
 /// Like a `BuddyAllocator`, but without a `Drop` impl or an associated
 /// allocator.
 ///
 /// This assists in tacking on the allocator type parameter because this struct can be
 /// moved out of, while `BuddyAllocator` itself cannot.
-struct BuddyAllocatorParts<const BLK_SIZE: usize, const LEVELS: usize> {
+struct RawBuddyAllocator<const BLK_SIZE: usize, const LEVELS: usize> {
     base: BasePtr,
     metadata: NonNull<u8>,
     num_blocks: usize,
     levels: [BuddyLevel; LEVELS],
 }
 
-impl<const BLK_SIZE: usize, const LEVELS: usize> BuddyAllocatorParts<BLK_SIZE, LEVELS> {
+impl<const BLK_SIZE: usize, const LEVELS: usize> RawBuddyAllocator<BLK_SIZE, LEVELS> {
     fn with_backing_allocator<A: BackingAllocator>(
         self,
         backing_allocator: A,
     ) -> BuddyAllocator<BLK_SIZE, LEVELS, A> {
-        let BuddyAllocatorParts {
+        let RawBuddyAllocator {
             base,
             metadata,
             num_blocks,
@@ -733,11 +766,11 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> BuddyAllocatorParts<BLK_SIZE, L
     ///   reads and writes for the entire size indicated by that `Layout`.
     ///
     /// [`Layout`]: core::alloc::Layout
-    pub unsafe fn new(
+    pub unsafe fn try_new(
         metadata: NonNull<u8>,
         base: NonNull<u8>,
         num_blocks: usize,
-    ) -> BuddyAllocatorParts<BLK_SIZE, LEVELS> {
+    ) -> Result<RawBuddyAllocator<BLK_SIZE, LEVELS>, AllocInitError> {
         let min_block_size = BuddyAllocator::<BLK_SIZE, LEVELS, Raw>::min_block_size();
 
         let full_layout = BuddyAllocator::<BLK_SIZE, LEVELS, Raw>::metadata_layout(num_blocks);
@@ -839,11 +872,11 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> BuddyAllocatorParts<BLK_SIZE, L
 
         levels[0].free_list = (num_blocks > 0).then(|| base.ptr.addr());
 
-        BuddyAllocatorParts {
+        Ok(RawBuddyAllocator {
             base,
             metadata,
             num_blocks,
             levels,
-        }
+        })
     }
 }
