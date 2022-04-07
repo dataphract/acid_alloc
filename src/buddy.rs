@@ -279,7 +279,7 @@ impl BuddyLevel {
 ///   can be calculated with the formula `BLK_SIZE >> (LEVELS - 1)`.
 ///
 /// Attempting to construct a `BuddyAllocator` whose const parameters violate
-/// these invariants will result in a panic.
+/// these invariants will result in an error.
 ///
 /// For example, the type of a buddy allocator which can allocate blocks of
 /// sizes from 16 to 4096 bytes would be:
