@@ -16,6 +16,8 @@
 // by unstable features.
 #![allow(unstable_name_collisions)]
 
+use core::sync::atomic::AtomicUsize;
+
 macro_rules! requires_sptr_or_unstable {
     ($($it:item)*) => {
         $(
@@ -34,6 +36,7 @@ extern crate alloc;
 requires_sptr_or_unstable! {
     mod bitmap;
     pub mod buddy;
+    pub mod slab;
 
     #[cfg(not(feature = "unstable"))]
     mod polyfill;
@@ -41,7 +44,11 @@ requires_sptr_or_unstable! {
     #[cfg(test)]
     mod tests;
 
-    use core::{alloc::Layout, num::NonZeroUsize, ptr::{self, NonNull}};
+    use core::{
+        alloc::{Layout, LayoutError},
+        num::NonZeroUsize,
+        ptr::{self, NonNull},
+    };
 
     #[cfg(feature = "unstable")]
     use core::alloc::Allocator;
@@ -53,6 +60,14 @@ requires_sptr_or_unstable! {
 
     #[cfg(not(feature = "unstable"))]
     use crate::polyfill::*;
+
+    pub(crate) fn layout_error() -> LayoutError {
+        // HACK: LayoutError is #[non_exhaustive], so it can't be
+        // constructed outside the standard library. As a workaround,
+        // deliberately pass bad values to the constructor to get one.
+
+        Layout::from_size_align(0, 0).unwrap_err()
+    }
 
     /// The error type for allocator constructors.
     #[derive(Clone, Debug)]
@@ -71,6 +86,13 @@ requires_sptr_or_unstable! {
         /// This variant is returned when an allocator's configuration
         /// parameters are impossible to satisfy.
         InvalidConfig,
+
+        /// The location of the allocator is invalid.
+        ///
+        /// This variant is returned when the full size of the managed region
+        /// would not fit at the provided address, i.e., pointer calculations
+        /// would overflow.
+        InvalidLocation,
     }
 
     /// A pointer to the base of the region of memory managed by an allocator.
@@ -103,6 +125,24 @@ requires_sptr_or_unstable! {
             };
         }
 
+        /// Initializes a `DoubleBlockLink` at the given address.
+        ///
+        /// # Safety
+        ///
+        /// The caller must uphold the following invariants:
+        /// - `addr` must be a properly aligned address for `DoubleBlockLink` values.
+        /// - The memory at `addr` must be within the provenance of `self` and valid
+        ///   for reads and writes for `size_of::<DoubleBlockLink>()` bytes.
+        /// - The memory at `addr` must be unallocated by the associated allocator.
+        unsafe fn init_double_link_at(self, addr: NonZeroUsize, link: DoubleBlockLink) {
+            unsafe {
+                self.with_addr(addr)
+                    .cast::<DoubleBlockLink>()
+                    .as_ptr()
+                    .write(link)
+            };
+        }
+
         /// Returns a mutable reference to the `BlockLink` at `link`.
         ///
         /// # Safety
@@ -114,6 +154,33 @@ requires_sptr_or_unstable! {
         ///   unallocated by the associated allocator.
         unsafe fn link_mut<'a>(self, link: NonZeroUsize) -> &'a mut BlockLink {
             unsafe { self.ptr.with_addr(link).cast::<BlockLink>().as_mut() }
+        }
+
+        /// Returns a mutable reference to the `AtomicBlockLink` at `link`.
+        ///
+        /// # Safety
+        ///
+        /// The caller must uphold the following invariants:
+        /// - `link` must be a properly aligned address for `AtomicBlockLink` values.
+        /// - The memory at `link` must contain a properly initialized `AtomicBlockLink` value.
+        /// - The memory at `link` must be within the provenance of `self` and
+        ///   unallocated by the associated allocator.
+        #[cfg(target_has_atomic = "ptr")]
+        unsafe fn atomic_link_mut<'a>(self, link: NonZeroUsize) -> &'a mut AtomicBlockLink {
+            unsafe { self.ptr.with_addr(link).cast::<AtomicBlockLink>().as_mut() }
+        }
+
+        /// Returns a mutable reference to the `DoubleBlockLink` at `link`.
+        ///
+        /// # Safety
+        ///
+        /// The caller must uphold the following invariants:
+        /// - `link` must be a properly aligned address for `DoubleBlockLink` values.
+        /// - The memory at `link` must contain a properly initialized `DoubleBlockLink` value.
+        /// - The memory at `link` must be within the provenance of `self` and
+        ///   unallocated by the associated allocator.
+        unsafe fn double_link_mut<'a>(self, link: NonZeroUsize) -> &'a mut DoubleBlockLink {
+            unsafe { self.ptr.with_addr(link).cast::<DoubleBlockLink>().as_mut() }
         }
 
         /// Creates a new pointer with the given address.
@@ -140,12 +207,23 @@ requires_sptr_or_unstable! {
         }
     }
 
+    #[repr(C)]
+    struct BlockLink {
+        next: Option<NonZeroUsize>,
+    }
+
+    #[cfg(target_has_atomic = "ptr")]
+    #[repr(C)]
+    struct AtomicBlockLink {
+        next: AtomicUsize,
+    }
+
     /// A link in a linked list of blocks of memory.
     ///
     /// This type is meant to be embedded in the block itself, forming an intrusive
     /// linked list.
     #[repr(C)]
-    struct BlockLink {
+    struct DoubleBlockLink {
         // Rather than using pointers, store only the addresses of the previous and
         // next links.  This avoids accidentally violating stacked borrows; the
         // links "point to" other blocks, but by forgoing actual pointers, no borrow

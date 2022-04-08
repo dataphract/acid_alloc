@@ -124,7 +124,7 @@ use crate::AllocError;
 #[cfg(all(any(feature = "alloc", test), feature = "unstable"))]
 use alloc::alloc::Global;
 
-use crate::{bitmap::Bitmap, AllocInitError, BackingAllocator, BasePtr, BlockLink, Raw};
+use crate::{bitmap::Bitmap, AllocInitError, BackingAllocator, BasePtr, DoubleBlockLink, Raw};
 
 #[cfg(not(feature = "unstable"))]
 use crate::polyfill::*;
@@ -166,12 +166,12 @@ impl BuddyLevel {
 
     /// Pushes a block onto the free list.
     unsafe fn free_list_push(&mut self, base: BasePtr, block: NonZeroUsize) {
-        assert_eq!(block.get() & (mem::align_of::<BlockLink>() - 1), 0);
+        assert_eq!(block.get() & (mem::align_of::<DoubleBlockLink>() - 1), 0);
 
         let new_head = block;
 
         if let Some(old_head) = self.free_list {
-            let old_head_mut = unsafe { base.link_mut(old_head) };
+            let old_head_mut = unsafe { base.double_link_mut(old_head) };
             old_head_mut.prev = Some(new_head);
         }
 
@@ -180,9 +180,9 @@ impl BuddyLevel {
         // If `old_head` exists, it now points back to `new_head`.
 
         unsafe {
-            base.init_link_at(
+            base.init_double_link_at(
                 block,
-                BlockLink {
+                DoubleBlockLink {
                     next: old_head,
                     prev: None,
                 },
@@ -205,11 +205,11 @@ impl BuddyLevel {
     /// - `block` must be the address of an element of `self.free_list`.
     unsafe fn free_list_remove(&mut self, base: BasePtr, block: NonZeroUsize) {
         unsafe {
-            let removed = base.link_mut(block);
+            let removed = base.double_link_mut(block);
 
             match removed.prev {
                 // Link `prev` forward to `next`.
-                Some(p) => base.link_mut(p).next = removed.next,
+                Some(p) => base.double_link_mut(p).next = removed.next,
 
                 // If there's no previous block, then `removed` is the head of
                 // the free list.
@@ -218,7 +218,7 @@ impl BuddyLevel {
 
             if let Some(n) = removed.next {
                 // Link `next` back to `prev`.
-                base.link_mut(n).prev = removed.prev;
+                base.double_link_mut(n).prev = removed.prev;
             }
         }
     }
@@ -232,7 +232,7 @@ impl BuddyLevel {
                 break;
             }
 
-            current = unsafe { base.link_mut(cur).next };
+            current = unsafe { base.double_link_mut(cur).next };
         }
 
         // If current is `Some`, then a suitable block was found.
@@ -482,7 +482,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> Buddy<BLK_
 
         let min_block_size = BLK_SIZE >> (LEVELS - 1);
         assert!(
-            min_block_size >= mem::size_of::<BlockLink>(),
+            min_block_size >= mem::size_of::<DoubleBlockLink>(),
             "buddy allocator minimum block size must be at least mem::size_of::<BlockLink>() bytes"
         );
 
@@ -859,7 +859,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> RawBuddy<BLK_SIZE, LEVELS> {
         );
 
         let mut levels = unsafe {
-            // When `MaybeUninit::array_assume_init()` is stable, use that
+            // TODO: When `MaybeUninit::array_assume_init()` is stable, use that
             // instead.
             //
             // SAFETY:
@@ -885,14 +885,17 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> RawBuddy<BLK_SIZE, LEVELS> {
                 NonZeroUsize::new(prev_addr).unwrap()
             });
 
+            // Safe unchecked sub: if num_blocks == 0, the loop body is never entered.
+            let is_not_last = block_idx < num_blocks - 1;
+
             // All blocks except the last link to the next block.
-            let next = (block_idx < num_blocks - 1).then(|| {
+            let next = is_not_last.then(|| {
                 let next_addr = block_addr.get().checked_add(levels[0].block_size).unwrap();
                 NonZeroUsize::new(next_addr).unwrap()
             });
 
             unsafe {
-                base.init_link_at(block_addr, BlockLink { prev, next });
+                base.init_double_link_at(block_addr, DoubleBlockLink { prev, next });
             }
         }
 

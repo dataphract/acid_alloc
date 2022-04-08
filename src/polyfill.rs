@@ -36,15 +36,6 @@ pub trait LayoutExt {
 }
 
 #[cfg(not(feature = "unstable"))]
-pub fn layout_error() -> LayoutError {
-    // HACK: LayoutError is #[non_exhaustive], so it can't be
-    // constructed outside the standard library. As a workaround,
-    // deliberately pass bad values to the constructor to get one.
-
-    Layout::from_size_align(0, 0).unwrap_err()
-}
-
-#[cfg(not(feature = "unstable"))]
 impl LayoutExt for Layout {
     #[inline]
     fn padding_needed_for(&self, align: usize) -> usize {
@@ -112,6 +103,8 @@ use core::num::NonZeroUsize;
 
 #[cfg(feature = "sptr")]
 use sptr::Strict;
+
+use crate::layout_error;
 
 #[cfg(feature = "sptr")]
 pub trait NonNullStrict<T> {
