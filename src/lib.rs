@@ -11,8 +11,7 @@
     all(feature = "unstable", not(feature = "sptr")),
     feature(strict_provenance)
 )]
-//#![cfg_attr(feature = "docs_rs", feature(doc_cfg))]
-#![feature(doc_cfg)]
+#![cfg_attr(docs_rs, feature(doc_cfg))]
 // This is necessary to allow `sptr` and `polyfill` to shadow methods provided
 // by unstable features.
 #![allow(unstable_name_collisions)]
@@ -50,7 +49,7 @@ requires_sptr_or_unstable! {
     #[cfg(not(feature = "unstable"))]
     use sptr::Strict;
 
-    pub use crate::buddy::BuddyAllocator;
+    pub use crate::{buddy::Buddy, slab::Slab};
 
     #[cfg(not(feature = "unstable"))]
     use crate::polyfill::*;

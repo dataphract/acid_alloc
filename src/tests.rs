@@ -5,7 +5,7 @@ use std::prelude::rust_2021::*;
 
 use quickcheck::{Arbitrary, Gen, QuickCheck};
 
-use crate::buddy::BuddyAllocator;
+use crate::buddy::Buddy;
 
 #[cfg(all(any(feature = "alloc", test), not(feature = "unstable")))]
 use crate::Global;
@@ -68,7 +68,7 @@ fn allocations_are_mutually_exclusive() {
     const BLOCKS: usize = 16;
 
     fn prop<const BLK_SIZE: usize, const LEVELS: usize>(ops: Vec<AllocatorOp>) -> bool {
-        let mut alloc = BuddyAllocator::<BLK_SIZE, LEVELS, Global>::try_new(BLOCKS).unwrap();
+        let mut alloc = Buddy::<BLK_SIZE, LEVELS, Global>::try_new(BLOCKS).unwrap();
 
         let mut allocations = Vec::with_capacity(ops.len());
 
@@ -126,20 +126,20 @@ fn allocations_are_mutually_exclusive() {
 #[test]
 #[should_panic]
 fn zero_levels_panics() {
-    let _ = BuddyAllocator::<256, 0, Global>::try_new(8).unwrap();
+    let _ = Buddy::<256, 0, Global>::try_new(8).unwrap();
 }
 
 #[test]
 #[should_panic]
 fn too_many_levels_panics() {
     const LEVELS: usize = usize::BITS as usize;
-    let _ = BuddyAllocator::<256, LEVELS, Global>::try_new(8).unwrap();
+    let _ = Buddy::<256, LEVELS, Global>::try_new(8).unwrap();
 }
 
 #[test]
 #[should_panic]
 fn non_power_of_two_block_size_panics() {
-    let _ = BuddyAllocator::<255, 4, Global>::try_new(8).unwrap();
+    let _ = Buddy::<255, 4, Global>::try_new(8).unwrap();
 }
 
 #[test]
@@ -150,7 +150,7 @@ fn too_small_min_block_size_panics() {
     const BLK_SIZE: usize = MIN_SIZE << (LEVELS - 1);
     const NUM_BLOCKS: usize = 8;
 
-    let _ = BuddyAllocator::<BLK_SIZE, LEVELS, Global>::try_new(NUM_BLOCKS).unwrap();
+    let _ = Buddy::<BLK_SIZE, LEVELS, Global>::try_new(NUM_BLOCKS).unwrap();
 }
 
 #[test]
@@ -161,7 +161,7 @@ fn create_and_destroy() {
     const BLK_SIZE: usize = MIN_SIZE << (LEVELS - 1);
     const NUM_BLOCKS: usize = 8;
 
-    let allocator = BuddyAllocator::<BLK_SIZE, LEVELS, Global>::try_new(NUM_BLOCKS).unwrap();
+    let allocator = Buddy::<BLK_SIZE, LEVELS, Global>::try_new(NUM_BLOCKS).unwrap();
     drop(allocator);
 }
 
@@ -172,7 +172,7 @@ fn alloc_empty() {
     const BLK_SIZE: usize = MIN_SIZE << (LEVELS - 1);
     const NUM_BLOCKS: usize = 8;
 
-    let mut allocator = BuddyAllocator::<BLK_SIZE, LEVELS, Global>::try_new(NUM_BLOCKS).unwrap();
+    let mut allocator = Buddy::<BLK_SIZE, LEVELS, Global>::try_new(NUM_BLOCKS).unwrap();
 
     let layout = Layout::from_size_align(0, 1).unwrap();
     allocator.allocate(layout).unwrap_err();
@@ -185,7 +185,7 @@ fn alloc_min_size() {
     const BLK_SIZE: usize = MIN_SIZE << (LEVELS - 1);
     const NUM_BLOCKS: usize = 8;
 
-    let mut allocator = BuddyAllocator::<BLK_SIZE, LEVELS, Global>::try_new(NUM_BLOCKS).unwrap();
+    let mut allocator = Buddy::<BLK_SIZE, LEVELS, Global>::try_new(NUM_BLOCKS).unwrap();
 
     let layout = Layout::from_size_align(1, 1).unwrap();
     let a = allocator.allocate(layout).unwrap();
@@ -204,7 +204,7 @@ fn alloc_write_and_free() {
     const BLK_SIZE: usize = MIN_SIZE << (LEVELS - 1);
     const NUM_BLOCKS: usize = 8;
 
-    let mut allocator = BuddyAllocator::<BLK_SIZE, LEVELS, Global>::try_new(NUM_BLOCKS).unwrap();
+    let mut allocator = Buddy::<BLK_SIZE, LEVELS, Global>::try_new(NUM_BLOCKS).unwrap();
 
     unsafe {
         let layout = Layout::from_size_align(64, MIN_SIZE).unwrap();
@@ -232,7 +232,7 @@ fn coalesce_one() {
     const BLK_SIZE: usize = MIN_SIZE << (LEVELS - 1);
     const NUM_BLOCKS: usize = 1;
 
-    let mut allocator = BuddyAllocator::<BLK_SIZE, LEVELS, Global>::try_new(NUM_BLOCKS).unwrap();
+    let mut allocator = Buddy::<BLK_SIZE, LEVELS, Global>::try_new(NUM_BLOCKS).unwrap();
 
     let full_layout = Layout::from_size_align(2 * MIN_SIZE, MIN_SIZE).unwrap();
     let half_layout = Layout::from_size_align(MIN_SIZE, MIN_SIZE).unwrap();
@@ -270,7 +270,7 @@ fn coalesce_many() {
     const BLK_SIZE: usize = MIN_SIZE << (LEVELS - 1);
     const NUM_BLOCKS: usize = 8;
 
-    let mut allocator = BuddyAllocator::<BLK_SIZE, LEVELS, Global>::try_new(NUM_BLOCKS).unwrap();
+    let mut allocator = Buddy::<BLK_SIZE, LEVELS, Global>::try_new(NUM_BLOCKS).unwrap();
 
     for lvl in (0..LEVELS).rev() {
         let alloc_size = 2usize.pow((LEVELS - lvl - 1) as u32) * MIN_SIZE;

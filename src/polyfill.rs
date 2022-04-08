@@ -36,7 +36,7 @@ pub trait LayoutExt {
 }
 
 #[cfg(not(feature = "unstable"))]
-fn layout_error() -> LayoutError {
+pub fn layout_error() -> LayoutError {
     // HACK: LayoutError is #[non_exhaustive], so it can't be
     // constructed outside the standard library. As a workaround,
     // deliberately pass bad values to the constructor to get one.
