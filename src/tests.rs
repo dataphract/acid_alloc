@@ -1,6 +1,6 @@
 extern crate std;
 
-use core::{alloc::Layout, ptr::NonNull, slice};
+use crate::core::{alloc::Layout, ptr::NonNull, slice};
 use std::prelude::rust_2021::*;
 
 use quickcheck::{Arbitrary, Gen, QuickCheck};

@@ -16,7 +16,7 @@
 // by unstable features.
 #![allow(unstable_name_collisions)]
 
-use core::sync::atomic::AtomicUsize;
+use crate::core::sync::atomic::AtomicUsize;
 
 macro_rules! requires_sptr_or_unstable {
     ($($it:item)*) => {
@@ -38,28 +38,30 @@ requires_sptr_or_unstable! {
     pub mod buddy;
     pub mod slab;
 
-    #[cfg(not(feature = "unstable"))]
-    mod polyfill;
-
     #[cfg(test)]
     mod tests;
 
-    use core::{
+    #[cfg(not(feature = "unstable"))]
+    pub(crate) mod core;
+
+    #[cfg(feature = "unstable")]
+    pub(crate) mod core {
+        pub use core::{alloc, cmp, fmt, mem, num, ptr, slice, sync};
+    }
+
+    use crate::core::{
         alloc::{Layout, LayoutError},
         num::NonZeroUsize,
         ptr::{self, NonNull},
     };
 
     #[cfg(feature = "unstable")]
-    use core::alloc::Allocator;
+    use crate::core::alloc::Allocator;
 
     #[cfg(not(feature = "unstable"))]
-    use sptr::Strict;
+    use crate::core::ptr::{NonNullStrict, Strict};
 
     pub use crate::{buddy::Buddy, slab::Slab};
-
-    #[cfg(not(feature = "unstable"))]
-    use crate::polyfill::*;
 
     pub(crate) fn layout_error() -> LayoutError {
         // HACK: LayoutError is #[non_exhaustive], so it can't be
@@ -236,11 +238,6 @@ requires_sptr_or_unstable! {
         next: Option<NonZeroUsize>,
     }
 
-    /// Indicates an allocation failure due to resource exhaustion or an unsupported
-    /// set of arguments.
-    #[cfg(not(feature = "unstable"))]
-    #[derive(Copy, Clone, PartialEq, Eq, Debug)]
-    pub struct AllocError;
 
     /// Types which provide memory which backs an allocator.
     ///

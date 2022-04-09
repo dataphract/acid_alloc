@@ -1,7 +1,7 @@
-use core::{alloc::Layout, mem};
+use crate::core::{alloc::Layout, mem};
 
 #[cfg(not(feature = "unstable"))]
-use crate::polyfill::LayoutExt;
+use crate::core::alloc::LayoutExt;
 
 pub struct Bitmap {
     num_bits: usize,

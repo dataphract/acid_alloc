@@ -1,10 +1,10 @@
-//! A binary-buddy memory allocator.
+//! Binary-buddy allocation.
 //!
-//! The buddy algorithm divides the managed region into a sequence of
-//! uniformly-sized blocks. Each of these blocks can be recursively split in
+//! The buddy algorithm divides the managed region into a fixed number of
+//! equal, power-of-two-sized blocks. Each block can be recursively split in
 //! half a fixed number of times in order to provide finer-grained allocations.
-//! The buddy allocator excels in cases where most allocations have a
-//! power-of-two size and have `size >= alignment`.
+//! Buddy allocators excel in cases where most allocations have a power-of-two
+//! size.
 //!
 //! ## Characteristics
 //!
@@ -13,24 +13,29 @@
 //! | Operation                | Best-case | Worst-case                 |
 //! |--------------------------|-----------|----------------------------|
 //! | Allocate (size <= align) | O(1)      | O(log<sub>2</sub>_levels_) |
-//! | Allocate (size > align)  | O(1)      | O(N) in free list length   |
 //! | Deallocate               | O(1)      | O(log<sub>2</sub>_levels_) |
 //!
 //! #### Fragmentation
 //!
-//! The buddy algorithm exhibits minimal external fragmentation, but suffers up
-//! to 50% internal fragmentation because all allocatable blocks have a
+//! Buddy allocators exhibit limited external fragmentation, but suffer up to
+//! 50% internal fragmentation because all allocatable blocks have a
 //! power-of-two size.
 
 #![cfg(any(feature = "sptr", feature = "unstable"))]
 
-use core::{
-    alloc::Layout,
+use crate::core::{
+    alloc::{AllocError, Layout},
     cmp, fmt,
     mem::{self, MaybeUninit},
     num::NonZeroUsize,
     ptr::NonNull,
 };
+
+#[cfg(feature = "unstable")]
+use crate::core::alloc::Allocator;
+
+#[cfg(not(feature = "unstable"))]
+use crate::core::{alloc::LayoutExt, num::UsizeExt, ptr::NonNullStrict};
 
 /// Declares and implements `Allocator` for wrappers around an allocator.
 ///
@@ -115,19 +120,10 @@ declare_wrappers! {
         via inner: inner.write().unwrap();
 }
 
-#[cfg(feature = "unstable")]
-use core::alloc::{AllocError, Allocator};
-
-#[cfg(not(feature = "unstable"))]
-use crate::AllocError;
-
 #[cfg(all(any(feature = "alloc", test), feature = "unstable"))]
 use alloc::alloc::Global;
 
 use crate::{bitmap::Bitmap, AllocInitError, BackingAllocator, BasePtr, DoubleBlockLink, Raw};
-
-#[cfg(not(feature = "unstable"))]
-use crate::polyfill::*;
 
 #[cfg(all(any(feature = "alloc", test), not(feature = "unstable")))]
 use crate::Global;
@@ -224,19 +220,8 @@ impl BuddyLevel {
     }
 
     /// Allocates a block from the free list.
-    unsafe fn allocate(&mut self, base: BasePtr, align: usize) -> Option<NonZeroUsize> {
-        let mut current = self.free_list;
-
-        while let Some(cur) = current {
-            if cur.get() % align == 0 {
-                break;
-            }
-
-            current = unsafe { base.double_link_mut(cur).next };
-        }
-
-        // If current is `Some`, then a suitable block was found.
-        let block = current?;
+    unsafe fn allocate(&mut self, base: BasePtr) -> Option<NonZeroUsize> {
+        let block = self.free_list?;
 
         unsafe { self.free_list_remove(base, block) };
         let ofs = base.offset_to(block);
@@ -339,7 +324,7 @@ pub struct Buddy<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator
 }
 
 impl<const BLK_SIZE: usize, const LEVELS: usize> Buddy<BLK_SIZE, LEVELS, Raw> {
-    /// Construct a new `Buddy` from raw pointers.
+    /// Constructs a new `Buddy` from raw pointers.
     ///
     /// # Safety
     ///
@@ -414,7 +399,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> Buddy<BLK_SIZE, LEVELS, Global>
     /// [`handle_alloc_error`]: alloc::alloc::handle_alloc_error
     #[cfg_attr(docs_rs, doc(cfg(feature = "alloc")))]
     pub fn try_new(num_blocks: usize) -> Result<Buddy<BLK_SIZE, LEVELS, Global>, AllocInitError> {
-        Buddy::<BLK_SIZE, LEVELS, Global>::try_new_in_impl(num_blocks, Global)
+        Buddy::<BLK_SIZE, LEVELS, Global>::try_new_in(num_blocks, Global)
     }
 }
 
@@ -427,13 +412,6 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: Allocator> Buddy<BLK_SIZE, L
     /// If allocation fails, returns `Err(AllocError)`.
     #[cfg_attr(docs_rs, doc(cfg(feature = "unstable")))]
     pub fn try_new_in(
-        num_blocks: usize,
-        allocator: A,
-    ) -> Result<Buddy<BLK_SIZE, LEVELS, A>, AllocInitError> {
-        Self::try_new_in_impl(num_blocks, allocator)
-    }
-
-    fn try_new_in_impl(
         num_blocks: usize,
         allocator: A,
     ) -> Result<Buddy<BLK_SIZE, LEVELS, A>, AllocInitError> {
@@ -609,16 +587,14 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> Buddy<BLK_
     ///
     /// [`NonNull<[u8]>`]: NonNull
     pub fn allocate(&mut self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
-        if layout.size() == 0 {
+        if layout.size() == 0 || layout.align() > layout.size() {
             return Err(AllocError);
         }
 
         let target_level = self.level_for(layout.size()).ok_or(AllocError)?;
 
         // If there is a free block of the correct size, return it immediately.
-        if let Some(block) =
-            unsafe { self.levels[target_level].allocate(self.base, layout.align()) }
-        {
+        if let Some(block) = unsafe { self.levels[target_level].allocate(self.base) } {
             return Ok(self.base.with_addr_and_size(block, layout.size()));
         }
 
@@ -627,7 +603,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> Buddy<BLK_
             .rev()
             .find_map(|level| unsafe {
                 self.levels[level]
-                    .allocate(self.base, layout.align())
+                    .allocate(self.base)
                     .map(|block| (block, level))
             })
             .ok_or(AllocError)?;
@@ -655,9 +631,6 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> Buddy<BLK_
     }
 
     /// Deallocates the memory referenced by `ptr`.
-    ///
-    /// This is equivalent to `Self::deallocate()`, but without the `Layout`
-    /// parameter.
     ///
     /// # Safety
     ///
