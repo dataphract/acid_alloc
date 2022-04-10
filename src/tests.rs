@@ -1,17 +1,84 @@
 extern crate std;
 
-use crate::core::{alloc::Layout, ptr::NonNull, slice};
-use std::prelude::rust_2021::*;
+use crate::{
+    core::{alloc::Layout, cmp, fmt::Debug, ptr::NonNull, slice},
+    slab::Slab,
+    AllocError, AllocInitError, Buddy, Global,
+};
 
+#[cfg(not(feature = "unstable"))]
+use crate::core::alloc::LayoutExt;
+
+use alloc::{boxed::Box, vec::Vec};
 use quickcheck::{Arbitrary, Gen, QuickCheck};
 
-use crate::buddy::Buddy;
+trait QcAllocator: Sized {
+    type Params: Arbitrary + Debug;
 
-#[cfg(all(any(feature = "alloc", test), not(feature = "unstable")))]
-use crate::Global;
+    fn with_params(params: Self::Params) -> Result<Self, AllocInitError>;
 
-#[cfg(all(any(feature = "alloc", test), feature = "unstable"))]
-use alloc::alloc::Global;
+    fn allocate(&mut self, layout: Layout) -> Result<NonNull<[u8]>, AllocError>;
+
+    unsafe fn deallocate(&mut self, ptr: NonNull<u8>, _: Layout);
+}
+
+#[derive(Clone, Debug)]
+struct SlabParams {
+    num_blocks: usize,
+}
+
+impl Arbitrary for SlabParams {
+    fn arbitrary(g: &mut Gen) -> Self {
+        SlabParams {
+            num_blocks: usize::arbitrary(g) % g.size(),
+        }
+    }
+}
+
+impl<const BLK_SIZE: usize> QcAllocator for Slab<BLK_SIZE, Global> {
+    type Params = SlabParams;
+
+    fn with_params(params: Self::Params) -> Result<Self, AllocInitError> {
+        Slab::try_new(params.num_blocks)
+    }
+
+    fn allocate(&mut self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        self.allocate(layout)
+    }
+
+    unsafe fn deallocate(&mut self, ptr: NonNull<u8>, _: Layout) {
+        unsafe { self.deallocate(ptr) }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct BuddyParams {
+    num_blocks: usize,
+}
+
+impl Arbitrary for BuddyParams {
+    fn arbitrary(g: &mut Gen) -> Self {
+        BuddyParams {
+            num_blocks: cmp::max(usize::arbitrary(g) % g.size(), 1),
+        }
+    }
+}
+
+impl<const BLK_SIZE: usize, const LEVELS: usize> QcAllocator for Buddy<BLK_SIZE, LEVELS, Global> {
+    type Params = BuddyParams;
+
+    fn with_params(params: Self::Params) -> Result<Self, AllocInitError> {
+        Buddy::try_new(params.num_blocks)
+    }
+
+    fn allocate(&mut self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        self.allocate(layout)
+    }
+
+    unsafe fn deallocate(&mut self, ptr: NonNull<u8>, _: Layout) {
+        unsafe { self.deallocate(ptr) }
+    }
+}
 
 enum AllocatorOpTag {
     Allocate,
@@ -27,12 +94,6 @@ enum AllocatorOp {
     /// Given `n` outstanding allocations, the allocation to free is at index
     /// `index % n`.
     Free { index: usize },
-}
-
-struct Allocation {
-    id: u32,
-    ptr: *mut u32,
-    len: usize,
 }
 
 /// Limit on allocation size, expressed in bits.
@@ -58,246 +119,164 @@ impl Arbitrary for AllocatorOp {
     }
 }
 
-#[test]
-fn allocations_are_mutually_exclusive() {
-    // This config produces an allocator over 65536 bytes with block sizes from
-    // 16 to 1024.
-    const LEVELS: usize = 7;
-    const MIN_SIZE: usize = 16;
-    const BLK_SIZE: usize = MIN_SIZE << (LEVELS - 1);
-    const BLOCKS: usize = 16;
+struct Allocation {
+    id: u32,
+    layout: Layout,
+    ptr: NonNull<[u8]>,
+    // Length with regard to the type passed to self.set_layout_of::<T>()
+    len: usize,
+}
 
-    fn prop<const BLK_SIZE: usize, const LEVELS: usize>(ops: Vec<AllocatorOp>) -> bool {
-        let mut alloc = Buddy::<BLK_SIZE, LEVELS, Global>::try_new(BLOCKS).unwrap();
+struct AllocatorChecker<A: QcAllocator> {
+    allocator: A,
+    allocations: Vec<Allocation>,
+    num_ops: u32,
+    // Layout of single items.
+    layout: Layout,
+    post_allocate_hook: Option<Box<dyn Fn(u32, usize, &mut AllocResult) -> bool>>,
+    pre_deallocate_hook: Option<Box<dyn Fn(&Allocation) -> bool>>,
+}
 
-        let mut allocations = Vec::with_capacity(ops.len());
+type AllocResult = Result<NonNull<[u8]>, AllocError>;
 
-        for (id, op) in ops.into_iter().enumerate() {
-            match op {
-                AllocatorOp::Allocate { len } => {
-                    let layout = Layout::array::<u32>(len).unwrap();
+impl<A: QcAllocator> AllocatorChecker<A> {
+    fn new(params: A::Params, capacity: usize) -> Result<Self, AllocInitError> {
+        Ok(AllocatorChecker {
+            allocator: A::with_params(params)?,
+            allocations: Vec::with_capacity(capacity),
+            num_ops: 0,
+            layout: Layout::new::<u8>(),
+            post_allocate_hook: None,
+            pre_deallocate_hook: None,
+        })
+    }
 
-                    let ptr = unsafe {
-                        let ptr = match alloc.allocate(layout) {
-                            Ok(p) => p.as_ptr().cast(),
-                            Err(_) => continue,
-                        };
+    fn set_layout_of<T>(&mut self) {
+        self.layout = Layout::new::<T>();
+    }
 
-                        let slice: &mut [u32] = slice::from_raw_parts_mut(ptr, len);
-                        slice.fill(id as u32);
-                        drop(slice);
-                        ptr
-                    };
+    fn set_post_allocate_hook(
+        &mut self,
+        hook: impl Fn(u32, usize, &mut AllocResult) -> bool + 'static,
+    ) {
+        self.post_allocate_hook = Some(Box::new(hook));
+    }
 
-                    allocations.push(Allocation {
-                        id: id as u32,
-                        ptr,
-                        len,
-                    });
+    fn set_pre_deallocate_hook(&mut self, hook: impl Fn(&Allocation) -> bool + 'static) {
+        self.pre_deallocate_hook = Some(Box::new(hook));
+    }
+
+    fn do_op(&mut self, op: AllocatorOp) -> bool {
+        let op_id = self.num_ops;
+        self.num_ops += 1;
+
+        match op {
+            AllocatorOp::Allocate { len } => {
+                let layout = self.layout.repeat(len).unwrap().0;
+                let mut res = self.allocator.allocate(layout);
+
+                if !self
+                    .post_allocate_hook
+                    .as_ref()
+                    .map(|f| f(op_id, len, &mut res))
+                    .unwrap_or(true)
+                {
+                    return false;
                 }
 
-                AllocatorOp::Free { index } => {
-                    if allocations.is_empty() {
-                        continue;
+                match res {
+                    Ok(ptr) => {
+                        self.allocations.push(Allocation {
+                            id: op_id,
+                            layout,
+                            ptr,
+                            len,
+                        });
                     }
 
-                    let index = index % allocations.len();
-                    let a = allocations.swap_remove(index);
-
-                    unsafe {
-                        let slice: &[u32] = slice::from_raw_parts(a.ptr, a.len);
-                        if slice.iter().copied().any(|elem| elem != a.id as u32) {
-                            return false;
-                        }
-                    }
-
-                    unsafe { alloc.deallocate(NonNull::new(a.ptr.cast()).unwrap()) };
+                    // If the allocation should have succeeded, this is handled
+                    // by post_allocate_hook
+                    Err(AllocError) => (),
                 }
+            }
+
+            AllocatorOp::Free { index } => {
+                if self.allocations.is_empty() {
+                    return true;
+                }
+
+                let index = index % self.allocations.len();
+                let a = self.allocations.swap_remove(index);
+
+                if !self
+                    .pre_deallocate_hook
+                    .as_ref()
+                    .map(|f| f(&a))
+                    .unwrap_or(true)
+                {
+                    return false;
+                }
+
+                unsafe { self.allocator.deallocate(a.ptr.cast::<u8>(), a.layout) };
             }
         }
 
         true
     }
 
-    let mut qc = QuickCheck::new();
-    qc.quickcheck(prop::<BLK_SIZE, LEVELS> as fn(_) -> bool);
-}
-
-#[test]
-#[should_panic]
-fn zero_levels_panics() {
-    let _ = Buddy::<256, 0, Global>::try_new(8).unwrap();
-}
-
-#[test]
-#[should_panic]
-fn too_many_levels_panics() {
-    const LEVELS: usize = usize::BITS as usize;
-    let _ = Buddy::<256, LEVELS, Global>::try_new(8).unwrap();
-}
-
-#[test]
-#[should_panic]
-fn non_power_of_two_block_size_panics() {
-    let _ = Buddy::<255, 4, Global>::try_new(8).unwrap();
-}
-
-#[test]
-#[should_panic]
-fn too_small_min_block_size_panics() {
-    const LEVELS: usize = 8;
-    const MIN_SIZE: usize = core::mem::size_of::<usize>() / 2;
-    const BLK_SIZE: usize = MIN_SIZE << (LEVELS - 1);
-    const NUM_BLOCKS: usize = 8;
-
-    let _ = Buddy::<BLK_SIZE, LEVELS, Global>::try_new(NUM_BLOCKS).unwrap();
-}
-
-#[test]
-fn create_and_destroy() {
-    // These parameters give a maximum block size of 1KiB and a total size of 8KiB.
-    const LEVELS: usize = 8;
-    const MIN_SIZE: usize = 16;
-    const BLK_SIZE: usize = MIN_SIZE << (LEVELS - 1);
-    const NUM_BLOCKS: usize = 8;
-
-    let allocator = Buddy::<BLK_SIZE, LEVELS, Global>::try_new(NUM_BLOCKS).unwrap();
-    drop(allocator);
-}
-
-#[test]
-fn alloc_empty() {
-    const LEVELS: usize = 4;
-    const MIN_SIZE: usize = 16;
-    const BLK_SIZE: usize = MIN_SIZE << (LEVELS - 1);
-    const NUM_BLOCKS: usize = 8;
-
-    let mut allocator = Buddy::<BLK_SIZE, LEVELS, Global>::try_new(NUM_BLOCKS).unwrap();
-
-    let layout = Layout::from_size_align(0, 1).unwrap();
-    allocator.allocate(layout).unwrap_err();
-}
-
-#[test]
-fn alloc_min_size() {
-    const LEVELS: usize = 4;
-    const MIN_SIZE: usize = 16;
-    const BLK_SIZE: usize = MIN_SIZE << (LEVELS - 1);
-    const NUM_BLOCKS: usize = 8;
-
-    let mut allocator = Buddy::<BLK_SIZE, LEVELS, Global>::try_new(NUM_BLOCKS).unwrap();
-
-    let layout = Layout::from_size_align(1, 1).unwrap();
-    let a = allocator.allocate(layout).unwrap();
-    let _b = allocator.allocate(layout).unwrap();
-    let c = allocator.allocate(layout).unwrap();
-    unsafe {
-        allocator.deallocate(a.cast());
-        allocator.deallocate(c.cast());
+    fn run(&mut self, ops: Vec<AllocatorOp>) -> bool {
+        ops.into_iter().all(|op| self.do_op(op))
     }
 }
 
-#[test]
-fn alloc_write_and_free() {
-    const LEVELS: usize = 8;
-    const MIN_SIZE: usize = 16;
-    const BLK_SIZE: usize = MIN_SIZE << (LEVELS - 1);
-    const NUM_BLOCKS: usize = 8;
+// Miri is substantially slower to run property tests, so the number of test
+// cases is reduced to keep the runtime in check.
 
-    let mut allocator = Buddy::<BLK_SIZE, LEVELS, Global>::try_new(NUM_BLOCKS).unwrap();
+#[cfg(not(miri))]
+const MAX_TESTS: u64 = 100;
 
-    unsafe {
-        let layout = Layout::from_size_align(64, MIN_SIZE).unwrap();
-        let ptr: NonNull<u8> = allocator.allocate(layout).unwrap().cast();
+#[cfg(miri)]
+const MAX_TESTS: u64 = 20;
 
-        {
-            // Do this in a separate scope so that the slice no longer
-            // exists when ptr is freed
-            let buf: &mut [u8] = slice::from_raw_parts_mut(ptr.as_ptr(), layout.size());
-            for (i, byte) in buf.iter_mut().enumerate() {
-                *byte = i as u8;
-            }
+fn allocations_are_mutually_exclusive<A>(params: A::Params, ops: Vec<AllocatorOp>) -> bool
+where
+    A: QcAllocator,
+{
+    let mut checker = AllocatorChecker::<A>::new(params, ops.capacity()).unwrap();
+    checker.set_layout_of::<u32>();
+    checker.set_post_allocate_hook(|id, len, res| {
+        if let Ok(alloc) = res {
+            let u32_ptr: NonNull<u32> = alloc.cast();
+            let slice = unsafe { slice::from_raw_parts_mut(u32_ptr.as_ptr(), len) };
+            slice.fill(id);
         }
 
-        allocator.deallocate(ptr);
-    }
+        true
+    });
+    checker.set_pre_deallocate_hook(|alloc| {
+        let u32_ptr: NonNull<u32> = alloc.ptr.cast();
+        let slice = unsafe { slice::from_raw_parts(u32_ptr.as_ptr(), alloc.len) };
+        slice.iter().copied().all(|elem| elem == alloc.id)
+    });
+
+    checker.run(ops)
 }
 
 #[test]
-fn coalesce_one() {
-    // This configuration gives a 2-level buddy allocator with one
-    // splittable top-level block.
-    const LEVELS: usize = 2;
-    const MIN_SIZE: usize = 16;
-    const BLK_SIZE: usize = MIN_SIZE << (LEVELS - 1);
-    const NUM_BLOCKS: usize = 1;
-
-    let mut allocator = Buddy::<BLK_SIZE, LEVELS, Global>::try_new(NUM_BLOCKS).unwrap();
-
-    let full_layout = Layout::from_size_align(2 * MIN_SIZE, MIN_SIZE).unwrap();
-    let half_layout = Layout::from_size_align(MIN_SIZE, MIN_SIZE).unwrap();
-
-    unsafe {
-        // Allocate two minimum-size blocks to split the top block.
-        let a = allocator.allocate(half_layout).unwrap();
-        let b = allocator.allocate(half_layout).unwrap();
-
-        // Free both blocks, coalescing them.
-        allocator.deallocate(a.cast());
-        allocator.deallocate(b.cast());
-
-        // Allocate the entire region to ensure coalescing worked.
-        let c = allocator.allocate(full_layout).unwrap();
-        allocator.deallocate(c.cast());
-
-        // Same as above.
-        let a = allocator.allocate(half_layout).unwrap();
-        let b = allocator.allocate(half_layout).unwrap();
-
-        // Free both blocks, this time in reverse order.
-        allocator.deallocate(a.cast());
-        allocator.deallocate(b.cast());
-
-        let c = allocator.allocate(full_layout).unwrap();
-        allocator.deallocate(c.cast());
-    }
+fn slab_allocations_are_mutually_exclusive() {
+    let mut qc = QuickCheck::new().max_tests(MAX_TESTS);
+    qc.quickcheck(allocations_are_mutually_exclusive::<Slab<8, Global>> as fn(_, _) -> bool);
+    qc.quickcheck(allocations_are_mutually_exclusive::<Slab<16, Global>> as fn(_, _) -> bool);
+    qc.quickcheck(allocations_are_mutually_exclusive::<Slab<32, Global>> as fn(_, _) -> bool);
+    qc.quickcheck(allocations_are_mutually_exclusive::<Slab<64, Global>> as fn(_, _) -> bool);
+    qc.quickcheck(allocations_are_mutually_exclusive::<Slab<128, Global>> as fn(_, _) -> bool);
 }
 
 #[test]
-fn coalesce_many() {
-    const LEVELS: usize = 4;
-    const MIN_SIZE: usize = 16;
-    const BLK_SIZE: usize = MIN_SIZE << (LEVELS - 1);
-    const NUM_BLOCKS: usize = 8;
-
-    let mut allocator = Buddy::<BLK_SIZE, LEVELS, Global>::try_new(NUM_BLOCKS).unwrap();
-
-    for lvl in (0..LEVELS).rev() {
-        let alloc_size = 2usize.pow((LEVELS - lvl - 1) as u32) * MIN_SIZE;
-        let layout = Layout::from_size_align(alloc_size, MIN_SIZE).unwrap();
-        let num_allocs = 2usize.pow(lvl as u32) * NUM_BLOCKS;
-
-        let mut allocs = Vec::with_capacity(num_allocs);
-        for _ in 0..num_allocs {
-            let ptr = allocator.allocate(layout).unwrap();
-
-            {
-                // Do this in a separate scope so that the slice no longer
-                // exists when ptr is freed
-                let buf: &mut [u8] =
-                    unsafe { slice::from_raw_parts_mut(ptr.as_ptr().cast(), layout.size()) };
-                for (i, byte) in buf.iter_mut().enumerate() {
-                    *byte = (i % 256) as u8;
-                }
-            }
-
-            allocs.push(ptr);
-        }
-
-        for alloc in allocs {
-            unsafe {
-                allocator.deallocate(alloc.cast());
-            }
-        }
-    }
+fn buddy_allocations_are_mutually_exclusive() {
+    let mut qc = QuickCheck::new().max_tests(MAX_TESTS);
+    qc.quickcheck(allocations_are_mutually_exclusive::<Buddy<16, 1, Global>> as fn(_, _) -> bool);
+    qc.quickcheck(allocations_are_mutually_exclusive::<Buddy<128, 2, Global>> as fn(_, _) -> bool);
+    qc.quickcheck(allocations_are_mutually_exclusive::<Buddy<1024, 4, Global>> as fn(_, _) -> bool);
+    qc.quickcheck(allocations_are_mutually_exclusive::<Buddy<4096, 8, Global>> as fn(_, _) -> bool);
 }

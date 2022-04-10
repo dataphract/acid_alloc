@@ -7,16 +7,11 @@
 #![cfg_attr(feature = "unstable", feature(alloc_layout_extra))]
 #![cfg_attr(feature = "unstable", feature(allocator_api))]
 #![cfg_attr(feature = "unstable", feature(int_log))]
-#![cfg_attr(
-    all(feature = "unstable", not(feature = "sptr")),
-    feature(strict_provenance)
-)]
+#![cfg_attr(feature = "unstable", feature(strict_provenance))]
 #![cfg_attr(docs_rs, feature(doc_cfg))]
 // This is necessary to allow `sptr` and `polyfill` to shadow methods provided
 // by unstable features.
 #![allow(unstable_name_collisions)]
-
-use crate::core::sync::atomic::AtomicUsize;
 
 macro_rules! requires_sptr_or_unstable {
     ($($it:item)*) => {
@@ -61,7 +56,7 @@ requires_sptr_or_unstable! {
     #[cfg(not(feature = "unstable"))]
     use crate::core::ptr::{NonNullStrict, Strict};
 
-    pub use crate::{buddy::Buddy, slab::Slab};
+    pub use crate::{buddy::Buddy, core::alloc::AllocError, slab::Slab};
 
     pub(crate) fn layout_error() -> LayoutError {
         // HACK: LayoutError is #[non_exhaustive], so it can't be
@@ -118,6 +113,7 @@ requires_sptr_or_unstable! {
         /// - The memory at `addr` must be within the provenance of `self` and valid
         ///   for reads and writes for `size_of::<BlockLink>()` bytes.
         /// - The memory at `addr` must be unallocated by the associated allocator.
+        #[inline]
         unsafe fn init_link_at(self, addr: NonZeroUsize, link: BlockLink) {
             unsafe {
                 self.with_addr(addr)
@@ -136,6 +132,7 @@ requires_sptr_or_unstable! {
         /// - The memory at `addr` must be within the provenance of `self` and valid
         ///   for reads and writes for `size_of::<DoubleBlockLink>()` bytes.
         /// - The memory at `addr` must be unallocated by the associated allocator.
+        #[inline]
         unsafe fn init_double_link_at(self, addr: NonZeroUsize, link: DoubleBlockLink) {
             unsafe {
                 self.with_addr(addr)
@@ -154,22 +151,9 @@ requires_sptr_or_unstable! {
         /// - The memory at `link` must contain a properly initialized `BlockLink` value.
         /// - The memory at `link` must be within the provenance of `self` and
         ///   unallocated by the associated allocator.
+        #[inline]
         unsafe fn link_mut<'a>(self, link: NonZeroUsize) -> &'a mut BlockLink {
             unsafe { self.ptr.with_addr(link).cast::<BlockLink>().as_mut() }
-        }
-
-        /// Returns a mutable reference to the `AtomicBlockLink` at `link`.
-        ///
-        /// # Safety
-        ///
-        /// The caller must uphold the following invariants:
-        /// - `link` must be a properly aligned address for `AtomicBlockLink` values.
-        /// - The memory at `link` must contain a properly initialized `AtomicBlockLink` value.
-        /// - The memory at `link` must be within the provenance of `self` and
-        ///   unallocated by the associated allocator.
-        #[cfg(target_has_atomic = "ptr")]
-        unsafe fn atomic_link_mut<'a>(self, link: NonZeroUsize) -> &'a mut AtomicBlockLink {
-            unsafe { self.ptr.with_addr(link).cast::<AtomicBlockLink>().as_mut() }
         }
 
         /// Returns a mutable reference to the `DoubleBlockLink` at `link`.
@@ -181,6 +165,7 @@ requires_sptr_or_unstable! {
         /// - The memory at `link` must contain a properly initialized `DoubleBlockLink` value.
         /// - The memory at `link` must be within the provenance of `self` and
         ///   unallocated by the associated allocator.
+        #[inline]
         unsafe fn double_link_mut<'a>(self, link: NonZeroUsize) -> &'a mut DoubleBlockLink {
             unsafe { self.ptr.with_addr(link).cast::<DoubleBlockLink>().as_mut() }
         }
@@ -188,10 +173,12 @@ requires_sptr_or_unstable! {
         /// Creates a new pointer with the given address.
         ///
         /// The returned pointer has the provenance of this pointer.
+        #[inline]
         fn with_addr(self, addr: NonZeroUsize) -> NonNull<u8> {
             self.ptr.with_addr(addr)
         }
 
+        #[inline]
         fn with_addr_and_size(self, addr: NonZeroUsize, len: usize) -> NonNull<[u8]> {
             let ptr = self.ptr.as_ptr().with_addr(addr.get());
             let raw_slice = ptr::slice_from_raw_parts_mut(ptr, len);
@@ -212,12 +199,6 @@ requires_sptr_or_unstable! {
     #[repr(C)]
     struct BlockLink {
         next: Option<NonZeroUsize>,
-    }
-
-    #[cfg(target_has_atomic = "ptr")]
-    #[repr(C)]
-    struct AtomicBlockLink {
-        next: AtomicUsize,
     }
 
     /// A link in a linked list of blocks of memory.
@@ -287,6 +268,9 @@ requires_sptr_or_unstable! {
             unsafe { alloc::alloc::dealloc(ptr.as_ptr(), layout) };
         }
     }
+
+    #[cfg(all(any(feature = "alloc", test), feature = "unstable"))]
+    pub use alloc::alloc::Global;
 
     #[cfg(feature = "unstable")]
     impl<A: Allocator> Sealed for A {}
