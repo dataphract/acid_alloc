@@ -56,6 +56,7 @@ requires_sptr_or_unstable! {
     #[cfg(not(feature = "unstable"))]
     use crate::core::ptr::{NonNullStrict, Strict};
 
+    #[doc(inline)]
     pub use crate::{buddy::Buddy, core::alloc::AllocError, slab::Slab};
 
     pub(crate) fn layout_error() -> LayoutError {
