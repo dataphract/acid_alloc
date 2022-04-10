@@ -1,5 +1,4 @@
-//! Bare metal-friendly allocators.
-
+#![doc = include_str!("../README.md")]
 #![no_std]
 #![warn(missing_debug_implementations)]
 #![warn(missing_docs)]

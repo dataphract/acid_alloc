@@ -8,8 +8,12 @@ facilities like `memmap(2)`/`brk(2)`.
 
 The following allocator types are available:
 
-- `Buddy`, a binary-buddy allocator
-- `Slab`, a slab allocator
+- **`Buddy`, a binary-buddy allocator**. O(log<sub>2</sub>_levels_) worst-case
+  allocation and deallocation. Supports splitting and coalescing blocks by
+  powers of 2. Good choice for periodic medium-to-large allocations.
+- **`Slab`, a slab allocator**. O(1) allocation and deallocation. All
+  allocated blocks are the same size, making this allocator a good choice when
+  allocating many similarly-sized objects.
 
 ## Features
 
@@ -80,9 +84,9 @@ missing, please open an issue!_
 Licensed under either of
 
 - Apache License, Version 2.0
-  ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+  ([LICENSE-APACHE](LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
 - MIT license
-  ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+  ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
 
 at your option.
 

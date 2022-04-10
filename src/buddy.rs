@@ -207,28 +207,66 @@ impl BuddyLevel {
 /// For a discussion of the buddy algorithm, see the [module-level
 /// documentation].
 ///
-/// This takes two const parameters:
+/// # Configuration
+///
+/// This type has two const parameters:
 /// - `BLK_SIZE` is the size of the largest allocations the allocator can make.
 /// - `LEVELS` is the number of levels in the allocator.
+///
+/// Each constructor also takes one runtime parameter:
+/// - `num_blocks` is the number of top-level blocks of `BLK_SIZE` bytes managed
+///   by the allocator.
 ///
 /// These parameters are subject to the following invariants:
 /// - `BLK_SIZE` must be a power of two.
 /// - `LEVELS` must be nonzero and less than `usize::BITS`.
 /// - The minumum block size must be at least `2 * mem::size_of<usize>()`;  it
 ///   can be calculated with the formula `BLK_SIZE >> (LEVELS - 1)`.
+/// - The total size in bytes of the managed region must be less than
+///   `usize::MAX`.
 ///
 /// Attempting to construct a `Buddy` whose const parameters violate
 /// these invariants will result in an error.
 ///
-/// For example, the type of a buddy allocator which can allocate blocks of
-/// sizes from 16 to 4096 bytes would be:
+/// # Example
 ///
 /// ```
-/// use acid_alloc::Buddy;
+/// # #![cfg_attr(feature = "unstable", feature(allocator_api))]
+/// # #[cfg(feature = "alloc")]
+/// use core::{alloc::Layout, mem::MaybeUninit, ptr::NonNull};
+///
+/// # #[cfg(feature = "alloc")]
+/// use acid_alloc::{Buddy, Global};
 ///
 /// // Minimum block size == BLK_SIZE >> (LEVELS - 1)
 /// //                 16 ==     4096 >> (     9 - 1)
-/// type CustomBuddy<A> = Buddy<4096, 9, A>;
+/// # #[cfg(feature = "alloc")]
+/// type CustomBuddy = Buddy<4096, 9, Global>;
+///
+/// # #[cfg(feature = "alloc")]
+/// # fn main() {
+/// // Create a new `Buddy` with four 4KiB blocks, backed by the global allocator.
+/// let mut buddy = CustomBuddy::try_new(4).expect("buddy initialization failed.");
+///
+/// // Allocate space for an array of `u64`s.
+/// let len = 8;
+/// let layout = Layout::array::<u64>(len).expect("layout overflowed");
+/// let mut buf: NonNull<[u8]> = buddy.allocate(layout).expect("allocation failed");
+/// let mut uninit: NonNull<[MaybeUninit<u64>; 8]> = buf.cast();
+///
+/// // Initialize the array.
+/// unsafe {
+///     let mut arr: &mut [MaybeUninit<u64>; 8] = uninit.as_mut();
+///     for (i, elem) in arr.iter_mut().enumerate() {
+///         elem.as_mut_ptr().write(i as u64);
+///     }
+/// }
+///
+/// // Deallocate the array.
+/// unsafe { buddy.deallocate(buf.cast()) };
+/// # }
+///
+/// # #[cfg(not(feature = "alloc"))]
 /// # fn main() {}
 /// ```
 ///
@@ -521,7 +559,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> Buddy<BLK_
 
     /// Attempts to allocate a block of memory.
     ///
-    /// On success, returns a [`NonNull<[u8]>`] which satisfies `layout`.
+    /// On success, returns a [`NonNull<[u8]>`][0] which satisfies `layout`.
     ///
     /// The contents of the block are uninitialized.
     ///
@@ -529,7 +567,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> Buddy<BLK_
     ///
     /// Returns `Err` if a suitable block could not be allocated.
     ///
-    /// [`NonNull<[u8]>`]: NonNull
+    /// [0]: core::ptr::NonNull
     pub fn allocate(&mut self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         if layout.size() == 0 || layout.align() > layout.size() {
             return Err(AllocError);
