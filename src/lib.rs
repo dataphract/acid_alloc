@@ -1,16 +1,16 @@
 //! Bare metal-friendly allocators.
 
+#![no_std]
 #![warn(missing_debug_implementations)]
 #![warn(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]
-#![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(feature = "unstable", feature(alloc_layout_extra))]
 #![cfg_attr(feature = "unstable", feature(allocator_api))]
 #![cfg_attr(feature = "unstable", feature(int_log))]
 #![cfg_attr(feature = "unstable", feature(strict_provenance))]
 #![cfg_attr(docs_rs, feature(doc_cfg))]
-// This is necessary to allow `sptr` and `polyfill` to shadow methods provided
-// by unstable features.
+// This is necessary to allow `sptr` and `crate::core` to shadow methods
+// provided by unstable features.
 #![allow(unstable_name_collisions)]
 
 macro_rules! requires_sptr_or_unstable {
@@ -197,29 +197,33 @@ requires_sptr_or_unstable! {
         }
     }
 
-    #[repr(C)]
-    struct BlockLink {
-        next: Option<NonZeroUsize>,
-    }
+    // Rather than using pointers, store only the addresses of the previous and
+    // next links.  This avoids accidentally violating stacked borrows; the
+    // links "point to" other blocks, but by forgoing actual pointers, no borrow
+    // is implied.
+    //
+    // NOTE: Using this method, any actual pointer to a block must be acquired
+    // via the allocator base pointer, and NOT by casting these addresses
+    // directly!
 
     /// A link in a linked list of blocks of memory.
     ///
     /// This type is meant to be embedded in the block itself, forming an intrusive
     /// linked list.
     #[repr(C)]
-    struct DoubleBlockLink {
-        // Rather than using pointers, store only the addresses of the previous and
-        // next links.  This avoids accidentally violating stacked borrows; the
-        // links "point to" other blocks, but by forgoing actual pointers, no borrow
-        // is implied.
-        //
-        // NOTE: Using this method, any actual pointer to a block must be acquired
-        // via the allocator base pointer, and NOT by casting these addresses
-        // directly!
-        prev: Option<NonZeroUsize>,
+    struct BlockLink {
         next: Option<NonZeroUsize>,
     }
 
+    /// A double link in a linked list of blocks of memory.
+    ///
+    /// This type is meant to be embedded in the block itself, forming an intrusive
+    /// doubly linked list.
+    #[repr(C)]
+    struct DoubleBlockLink {
+        prev: Option<NonZeroUsize>,
+        next: Option<NonZeroUsize>,
+    }
 
     /// Types which provide memory which backs an allocator.
     ///

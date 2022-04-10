@@ -192,9 +192,7 @@ where
     /// Returns `Err` if the total size and alignment of the region cannot be
     /// represented as a [`Layout`].
     pub fn region_layout(num_blocks: usize) -> Result<Layout, LayoutError> {
-        let total_size = BLK_SIZE
-            .checked_mul(num_blocks)
-            .ok_or_else(|| layout_error())?;
+        let total_size = BLK_SIZE.checked_mul(num_blocks).ok_or_else(layout_error)?;
 
         Layout::from_size_align(total_size, BLK_SIZE)
     }
@@ -328,6 +326,7 @@ impl<const BLK_SIZE: usize> RawSlab<BLK_SIZE> {
 
         let base = BasePtr { ptr: region };
 
+        // Initialize the free list by emplacing links in each block.
         for block_addr in (region.addr().get()..region_end.get()).step_by(BLK_SIZE) {
             // SAFETY: block_addr is a step between region.addr() and
             // region_end, both of which are nonzero.

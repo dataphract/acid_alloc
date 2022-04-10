@@ -16,7 +16,6 @@ rustdoc-args = ["--cfg", "docs_rs"]
 [features]
 default = ["sptr"]
 
-std = ["alloc"]
 alloc = []
 
 # Enables nightly-only unstable Rust features.

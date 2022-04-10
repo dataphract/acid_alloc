@@ -9,6 +9,7 @@ facilities like `memmap(2)`/`brk(2)`.
 The following allocator types are available:
 
 - `Buddy`, a binary-buddy allocator
+- `Slab`, a slab allocator
 
 ## Features
 
@@ -24,37 +25,29 @@ available when enabling feature flags:
   <th>Description</th>
  </tr>
  <tr><!-- sptr -->
-  <td>`sptr`</td>
+  <td><code>sptr</code></td>
   <td>Yes</td>
   <td>No</td>
   <td>
-   Uses the [`sptr`] polyfill for Strict Provenance.
+   Uses the <a href="https://crates.io/crates/sptr"><code>sptr</code></a> polyfill for Strict Provenance.
   </td>
  </tr>
  <tr>
-  <td>`unstable`</td>
+  <td><code>unstable</code></td>
   <td>No</td>
   <td>Yes</td>
   <td>
-   Exposes `Allocator` implementations for this crate's allocators, and enables
-   the internal use of nightly-only Rust features. Obviates `sptr`.
+   Exposes constructors for allocators backed by implementors of the
+   unstable<code>Allocator</code> trait, and enables the internal use of
+   nightly-only Rust features. Obviates <code>sptr</code>.
   </td>
  </tr>
- <tr><!-- Requires nightly? -->
-  <td>`alloc`</td>
+ <tr>
+  <td><code>alloc</code></td>
   <td>No</td>
   <td>No</td>
   <td>
    Exposes constructors for allocators backed by the global allocator.
-  </td>
- </tr>
- <tr><!-- Description -->
-  <td>`std`</td>
-  <td>No</td>
-  <td>No</td>
-  <td>
-   Exposes additional wrapper types for allocators using the standard `Mutex`
-   and `RwLock`.
   </td>
  </tr>
 </table>
@@ -69,7 +62,7 @@ features are listed below along with their authors and/or maintainers:
 
 - `alloc_layout_extra`, by [Amanieu d'Antras]
 - `int_log`, by [yoshuawuyts]
-- `strict_provenance` for `NonNull<T>`, by [Aria Beingessner (aka Gankra)]
+- `strict_provenance` for `NonNull<T>`, by [Aria Beingessner (Gankra)]
 
 This crate also depends on [`sptr`] (also authored by Gankra) to reproduce
 strict provenance for normal pointers on stable Rust.
@@ -80,7 +73,7 @@ missing, please open an issue!_
 [library api team]: https://www.rust-lang.org/governance/teams/library#Library%20API%20team
 [amanieu d'antras]: https://github.com/Amanieu
 [yoshuawuyts]: https://github.com/yoshuawuyts
-[aria beingessner (aka gankra)]: https://github.com/Gankra
+[aria beingessner (gankra)]: https://github.com/Gankra
 
 ## License
 

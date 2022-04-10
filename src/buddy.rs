@@ -35,7 +35,11 @@ use crate::core::{
 use crate::core::alloc::Allocator;
 
 #[cfg(not(feature = "unstable"))]
-use crate::core::{alloc::LayoutExt, num::UsizeExt, ptr::NonNullStrict};
+use crate::core::{
+    alloc::LayoutExt,
+    num::UsizeExt,
+    ptr::{NonNullStrict, Strict},
+};
 
 #[cfg(all(any(feature = "alloc", test), feature = "unstable"))]
 use alloc::alloc::Global;
@@ -47,6 +51,7 @@ use crate::Global;
 
 struct BuddyLevel {
     block_size: usize,
+    block_pow: u32,
     free_list: Option<NonZeroUsize>,
     buddies: Bitmap,
     splits: Option<Bitmap>,
@@ -55,19 +60,21 @@ struct BuddyLevel {
 impl BuddyLevel {
     /// Retrieves the index of the block which starts `block_ofs` bytes from the
     /// base.
+    ///
+    /// `block_ofs` must be a multiple of `self.block_size`.
     #[inline]
     fn index_of(&self, block_ofs: usize) -> usize {
-        assert_eq!(block_ofs % self.block_size, 0);
-
-        block_ofs.checked_div(self.block_size).unwrap()
+        // Safe unchecked shr: public Buddy ctors guarantee that
+        // self.block_pow < usize::BITS
+        block_ofs >> self.block_pow as usize
     }
 
     /// Retrieves the index of the buddy bit for the block which starts
     /// `block_ofs` bytes from the base.
     #[inline]
     fn buddy_bit(&self, block_ofs: usize) -> usize {
-        // Safe unchecked division: divisor is nonzero
-        self.index_of(block_ofs) / 2
+        // Safe unchecked shr: RHS is < usize::BITS
+        self.index_of(block_ofs) >> 1
     }
 
     /// Retrieves the offset of the buddy of the block which starts
@@ -400,7 +407,12 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> Buddy<BLK_
             .try_into()
             .map_err(|_| AllocInitError::InvalidConfig)?;
 
-        let size = 2usize.pow(levels - 1) * min_block_size * num_blocks.get();
+        let size = 2usize
+            .pow(levels - 1)
+            .checked_mul(min_block_size)
+            .ok_or(AllocInitError::InvalidConfig)?
+            .checked_mul(num_blocks.get())
+            .ok_or(AllocInitError::InvalidConfig)?;
         let align = min_block_size;
 
         Layout::from_size_align(size, align).map_err(|_| AllocInitError::InvalidConfig)
@@ -703,10 +715,21 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> RawBuddy<BLK_SIZE, LEVELS> {
         num_blocks: usize,
     ) -> Result<RawBuddy<BLK_SIZE, LEVELS>, AllocInitError> {
         let num_blocks = NonZeroUsize::new(num_blocks).ok_or(AllocInitError::InvalidConfig)?;
-
         let min_block_size = Buddy::<BLK_SIZE, LEVELS, Raw>::min_block_size()?;
+        let meta_layout = Buddy::<BLK_SIZE, LEVELS, Raw>::metadata_layout_impl(num_blocks)?;
+        let region_layout = Buddy::<BLK_SIZE, LEVELS, Raw>::region_layout_impl(num_blocks)?;
 
-        let full_layout = Buddy::<BLK_SIZE, LEVELS, Raw>::metadata_layout_impl(num_blocks).unwrap();
+        // Ensure pointer calculations will not overflow.
+        // TODO: use checked_add directly on NonNull when nonzero_ops is stable.
+        let meta_end = metadata
+            .addr()
+            .get()
+            .checked_add(meta_layout.size())
+            .ok_or(AllocInitError::InvalidLocation)?;
+        base.addr()
+            .get()
+            .checked_add(region_layout.size())
+            .ok_or(AllocInitError::InvalidLocation)?;
 
         // TODO: use MaybeUninit::uninit_array when not feature gated
         let mut levels: [MaybeUninit<BuddyLevel>; LEVELS] = unsafe {
@@ -753,6 +776,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> RawBuddy<BLK_SIZE, LEVELS> {
             unsafe {
                 level.as_mut_ptr().write(BuddyLevel {
                     block_size,
+                    block_pow: block_size.trailing_zeros(),
                     free_list: None,
                     buddies: buddy_bitmap,
                     splits: split_bitmap,
@@ -760,11 +784,9 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> RawBuddy<BLK_SIZE, LEVELS> {
             }
         }
 
-        let offset = unsafe { meta_curs.offset_from(metadata.as_ptr()) };
-        let size_i = full_layout.size().try_into().unwrap();
-        if offset > size_i {
+        if meta_curs.addr() > meta_end {
             panic!(
-                "metadata cursor overran layout size: curs = {offset}, layout = {full_layout:?}"
+                "metadata cursor overran layout size: curs = {meta_end}, layout = {meta_layout:?}"
             );
         }
 
@@ -836,24 +858,29 @@ mod tests {
     use alloc::alloc::Global;
 
     #[test]
-    fn zero_levels_fails() {
+    fn zero_levels_errors() {
         let _ = Buddy::<256, 0, Global>::try_new(8).unwrap_err();
     }
 
     #[test]
-    fn too_many_levels_fails() {
+    fn overflow_address_space_errors() {
+        let _ = Buddy::<256, 1, Global>::try_new(usize::MAX).unwrap_err();
+    }
+
+    #[test]
+    fn too_many_levels_errors() {
         const LEVELS: usize = usize::BITS as usize;
         let _ = Buddy::<256, LEVELS, Global>::try_new(8).unwrap_err();
     }
 
     #[test]
-    fn non_power_of_two_block_size_fails() {
+    fn non_power_of_two_block_size_errors() {
         let _ = Buddy::<0, 1, Global>::try_new(8).unwrap_err();
         let _ = Buddy::<255, 4, Global>::try_new(8).unwrap_err();
     }
 
     #[test]
-    fn too_small_min_block_size_fails() {
+    fn too_small_min_block_size_errors() {
         const LEVELS: usize = 8;
         const MIN_SIZE: usize = core::mem::size_of::<usize>() / 2;
         const BLK_SIZE: usize = MIN_SIZE << (LEVELS - 1);
@@ -863,7 +890,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_blocks_fails() {
+    fn zero_blocks_errors() {
         Buddy::<128, 4, Global>::try_new(0).unwrap_err();
     }
 
