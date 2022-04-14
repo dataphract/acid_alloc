@@ -2,6 +2,7 @@
 extern crate std;
 
 use crate::{
+    bump::Bump,
     core::{alloc::Layout, cmp, fmt::Debug, ptr::NonNull, slice},
     slab::Slab,
     AllocError, AllocInitError, Buddy, Global,
@@ -70,6 +71,39 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> QcAllocator for Buddy<BLK_SIZE,
 
     fn with_params(params: Self::Params) -> Result<Self, AllocInitError> {
         Buddy::try_new(params.num_blocks)
+    }
+
+    fn allocate(&mut self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        self.allocate(layout)
+    }
+
+    unsafe fn deallocate(&mut self, ptr: NonNull<u8>, _: Layout) {
+        unsafe { self.deallocate(ptr) }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct BumpParams {
+    layout: Layout,
+}
+
+impl Arbitrary for BumpParams {
+    fn arbitrary(g: &mut Gen) -> Self {
+        BumpParams {
+            layout: Layout::from_size_align(
+                usize::arbitrary(g) % 8192,
+                1 << (usize::arbitrary(g) % 5),
+            )
+            .unwrap(),
+        }
+    }
+}
+
+impl QcAllocator for Bump<Global> {
+    type Params = BumpParams;
+
+    fn with_params(params: Self::Params) -> Result<Self, AllocInitError> {
+        Bump::try_new(params.layout)
     }
 
     fn allocate(&mut self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
@@ -280,4 +314,10 @@ fn buddy_allocations_are_mutually_exclusive() {
     qc.quickcheck(allocations_are_mutually_exclusive::<Buddy<128, 2, Global>> as fn(_, _) -> bool);
     qc.quickcheck(allocations_are_mutually_exclusive::<Buddy<1024, 4, Global>> as fn(_, _) -> bool);
     qc.quickcheck(allocations_are_mutually_exclusive::<Buddy<4096, 8, Global>> as fn(_, _) -> bool);
+}
+
+#[test]
+fn bump_allocations_are_mutually_exclusive() {
+    let mut qc = QuickCheck::new().max_tests(MAX_TESTS);
+    qc.quickcheck(allocations_are_mutually_exclusive::<Bump<Global>> as fn(_, _) -> bool);
 }

@@ -11,6 +11,10 @@ The following allocator types are available:
 - **`Buddy`, a binary-buddy allocator**. O(log<sub>2</sub>_levels_) worst-case
   allocation and deallocation. Supports splitting and coalescing blocks by
   powers of 2. Good choice for periodic medium-to-large allocations.
+- **`Bump`, a bump allocator**. O(1) allocation. Extremely fast to allocate and
+  flexible in terms of allocation layout, but unable to deallocate individual
+  items. Good choice for allocations that will never be deallocated or that will
+  be deallocated en masse.
 - **`Slab`, a slab allocator**. O(1) allocation and deallocation. All
   allocated blocks are the same size, making this allocator a good choice when
   allocating many similarly-sized objects.

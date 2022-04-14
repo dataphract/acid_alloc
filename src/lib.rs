@@ -30,6 +30,7 @@ extern crate alloc;
 requires_sptr_or_unstable! {
     mod bitmap;
     pub mod buddy;
+    pub mod bump;
     pub mod slab;
 
     #[cfg(test)]

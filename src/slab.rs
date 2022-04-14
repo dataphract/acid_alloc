@@ -131,7 +131,7 @@ impl<const BLK_SIZE: usize> Slab<BLK_SIZE, Global> {
     }
 }
 
-#[cfg(all(any(feature = "alloc", test), feature = "unstable"))]
+#[cfg(feature = "unstable")]
 impl<const BLK_SIZE: usize, A> Slab<BLK_SIZE, A>
 where
     A: Allocator,
