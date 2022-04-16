@@ -18,7 +18,7 @@
 //! amount of deallocated data until all blocks are deallocated or the allocator
 //! is manually reset.
 
-use core::fmt;
+use core::{fmt, ptr};
 
 use crate::{
     core::{
@@ -243,6 +243,18 @@ where
     /// [`Bump::deallocate()`]: Bump::deallocate
     pub unsafe fn reset(&mut self) {
         self.low_mark = self.limit;
+    }
+
+    /// Returns a pointer to the managed region.
+    ///
+    /// It is undefined behavior to dereference the returned pointer or upgrade
+    /// it to a reference if there are any outstanding allocations.
+    pub fn region(&mut self) -> NonNull<[u8]> {
+        NonNull::new(ptr::slice_from_raw_parts_mut(
+            self.base.ptr.as_ptr(),
+            self.layout.size(),
+        ))
+        .unwrap()
     }
 }
 

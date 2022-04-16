@@ -20,6 +20,8 @@
 //! difference between the average allocation size and the allocator's block
 //! size.
 
+use core::ptr;
+
 use crate::core::{
     alloc::{AllocError, Layout, LayoutError},
     fmt, mem,
@@ -106,11 +108,22 @@ impl Slab<Global> {
             } else {
                 // SAFETY: region size is not zero
                 let region_raw = alloc::alloc::alloc(region_layout);
-                NonNull::new(region_raw).ok_or(AllocInitError::AllocFailed(region_layout))?
+                NonNull::new(region_raw).ok_or_else(|| {
+                    alloc::alloc::dealloc(region_raw, region_layout);
+                    AllocInitError::AllocFailed(region_layout)
+                })?
             };
 
-            RawSlab::try_new(region_ptr, block_size, num_blocks)
-                .map(|s| s.with_backing_allocator(Global))
+            match RawSlab::try_new(region_ptr, block_size, num_blocks) {
+                Ok(s) => Ok(s.with_backing_allocator(Global)),
+                Err(e) => {
+                    if region_layout.size() != 0 {
+                        alloc::alloc::dealloc(region_ptr.as_ptr(), region_layout);
+                    }
+
+                    Err(e)
+                }
+            }
         }
     }
 }
@@ -248,6 +261,18 @@ where
             self.base.link_mut(addr).next = self.free_list;
             self.free_list = Some(addr);
         }
+    }
+
+    /// Returns a pointer to the managed region.
+    ///
+    /// It is undefined behavior to dereference the returned pointer or upgrade
+    /// it to a reference if there are any outstanding allocations.
+    pub fn region(&mut self) -> NonNull<[u8]> {
+        NonNull::new(ptr::slice_from_raw_parts_mut(
+            self.base.ptr.as_ptr(),
+            self.num_blocks * self.block_size,
+        ))
+        .unwrap()
     }
 }
 

@@ -23,6 +23,12 @@
 
 #![cfg(any(feature = "sptr", feature = "unstable"))]
 
+use core::{
+    iter::{self, Peekable},
+    ops::Range,
+    ptr,
+};
+
 use crate::core::{
     alloc::{AllocError, Layout},
     cmp, fmt,
@@ -172,7 +178,7 @@ impl BuddyLevel {
         coalesce: bool,
     ) -> Option<NonNull<u8>> {
         // Immediately drop and shadow the mutable pointer by converting it to
-        // an address.  This indicates to the compiler that the base pointer has
+        // an address. This indicates to the compiler that the base pointer has
         // sole access to the block.
         let block = block.addr();
         let block_ofs = base.offset_to(block);
@@ -326,6 +332,45 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> Buddy<BLK_SIZE, LEVELS, Raw> {
                 .map(|p| p.with_backing_allocator(Raw))
         }
     }
+
+    /// Constructs a new `Buddy` from raw pointers, with gaps specified by
+    /// address ranges.
+    ///
+    /// # Safety
+    ///
+    /// The caller must uphold the following invariants:
+    /// - `region` must be a pointer to a region that satisfies the [`Layout`]
+    ///   returned by [`Self::region_layout(num_blocks)`], and it must be valid
+    ///   for reads and writes for the entire size indicated by that `Layout`.
+    /// - `metadata` must be a pointer to a region that satisfies the [`Layout`]
+    ///   returned by [`Self::metadata_layout(num_blocks)`], and it must be
+    ///   valid for reads and writes for the entire size indicated by that
+    ///   `Layout`.
+    ///
+    ///  # Errors
+    ///
+    ///  This constructor returns an error if the allocator configuration is
+    ///  invalid.
+    ///
+    /// [`Self::region_layout(num_blocks)`]: Self::region_layout
+    /// [`Self::metadata_layout(num_blocks)`]: Self::metadata_layout
+    /// [`Layout`]: core::alloc::Layout
+    pub unsafe fn new_raw_with_address_gaps<I>(
+        metadata: NonNull<u8>,
+        region: NonNull<u8>,
+        num_blocks: usize,
+        gaps: I,
+    ) -> Result<Buddy<BLK_SIZE, LEVELS, Raw>, AllocInitError>
+    where
+        I: IntoIterator<Item = Range<NonZeroUsize>>,
+    {
+        unsafe {
+            RawBuddy::<BLK_SIZE, LEVELS>::try_new_with_address_gaps(
+                metadata, region, num_blocks, gaps,
+            )
+            .map(|p| p.with_backing_allocator(Raw))
+        }
+    }
 }
 
 #[cfg(all(any(feature = "alloc", test), not(feature = "unstable")))]
@@ -357,6 +402,64 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> Buddy<BLK_SIZE, LEVELS, Global>
 
             match RawBuddy::<BLK_SIZE, LEVELS>::try_new(metadata_ptr, region_ptr, num_blocks.get())
             {
+                Ok(b) => Ok(b.with_backing_allocator(Global)),
+                Err(e) => {
+                    alloc::alloc::dealloc(region_ptr.as_ptr(), region_layout);
+                    alloc::alloc::dealloc(metadata_ptr.as_ptr(), metadata_layout);
+
+                    Err(e)
+                }
+            }
+        }
+    }
+
+    /// Attempts to construct a new `Buddy` backed by the global allocator, with
+    /// gaps specified by offset ranges.
+    ///
+    /// # Errors
+    ///
+    /// If allocation fails, returns `Err(AllocError)`.
+    pub fn try_new_with_offset_gaps<I>(
+        num_blocks: usize,
+        gaps: I,
+    ) -> Result<Buddy<BLK_SIZE, LEVELS, Global>, AllocInitError>
+    where
+        I: IntoIterator<Item = Range<usize>>,
+    {
+        let region_layout = Self::region_layout(num_blocks)?;
+        let metadata_layout = Self::metadata_layout(num_blocks)?;
+
+        let num_blocks = NonZeroUsize::new(num_blocks).ok_or(AllocInitError::InvalidConfig)?;
+
+        unsafe {
+            let region_ptr = {
+                let raw = alloc::alloc::alloc(region_layout);
+                NonNull::new(raw).ok_or(AllocInitError::AllocFailed(region_layout))?
+            };
+
+            let gaps = gaps.into_iter().map(|ofs| {
+                let start =
+                    NonZeroUsize::new(region_ptr.addr().get().checked_add(ofs.start).unwrap())
+                        .unwrap();
+                let end = NonZeroUsize::new(region_ptr.addr().get().checked_add(ofs.end).unwrap())
+                    .unwrap();
+                start..end
+            });
+
+            let metadata_ptr = {
+                let raw = alloc::alloc::alloc(metadata_layout);
+                NonNull::new(raw).ok_or_else(|| {
+                    alloc::alloc::dealloc(region_ptr.as_ptr(), region_layout);
+                    AllocInitError::AllocFailed(metadata_layout)
+                })?
+            };
+
+            match RawBuddy::<BLK_SIZE, LEVELS>::try_new_with_address_gaps(
+                metadata_ptr,
+                region_ptr,
+                num_blocks.get(),
+                gaps,
+            ) {
                 Ok(b) => Ok(b.with_backing_allocator(Global)),
                 Err(e) => {
                     alloc::alloc::dealloc(region_ptr.as_ptr(), region_layout);
@@ -460,7 +563,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> Buddy<BLK_
             .ok_or(AllocInitError::InvalidConfig)?
             .checked_mul(num_blocks.get())
             .ok_or(AllocInitError::InvalidConfig)?;
-        let align = min_block_size;
+        let align = BLK_SIZE;
 
         Layout::from_size_align(size, align).map_err(|_| AllocInitError::InvalidConfig)
     }
@@ -662,6 +765,18 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> Buddy<BLK_
         assert!(block.is_none(), "top level coalesced a block");
     }
 
+    /// Returns a pointer to the managed region.
+    ///
+    /// It is undefined behavior to dereference the returned pointer or upgrade
+    /// it to a reference if there are any outstanding allocations.
+    pub fn region(&mut self) -> NonNull<[u8]> {
+        NonNull::new(ptr::slice_from_raw_parts_mut(
+            self.base.ptr.as_ptr(),
+            self.num_blocks.get() * BLK_SIZE,
+        ))
+        .unwrap()
+    }
+
     /// Decomposes the allocator into its raw components.
     ///
     /// The returned tuple contains the region pointer and the metadata pointer.
@@ -761,6 +876,36 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> RawBuddy<BLK_SIZE, LEVELS> {
         base: NonNull<u8>,
         num_blocks: usize,
     ) -> Result<RawBuddy<BLK_SIZE, LEVELS>, AllocInitError> {
+        unsafe { Self::try_new_with_address_gaps(metadata, base, num_blocks, iter::empty()) }
+    }
+
+    /// Construct a new `RawBuddy` from raw pointers, with internal gaps.
+    ///
+    /// The address ranges in `gaps` are guaranteed not to be read from or
+    /// written to.
+    ///
+    /// # Safety
+    ///
+    /// The caller must uphold the following invariants:
+    /// - `gaps` must be an iterator of non-overlapping address ranges in
+    ///   ascending order.
+    /// - `base` must be a pointer to a region that satisfies the [`Layout`]
+    ///   returned by [`Self::region_layout()`], and it must be valid for reads
+    ///   and writes for the entire size indicated by that `Layout`.
+    /// - `metadata` must be a pointer to a region that satisfies the [`Layout`]
+    ///   returned by [`Self::metadata_layout()`], and it must be valid for
+    ///   reads and writes for the entire size indicated by that `Layout`.
+    ///
+    /// [`Layout`]: core::alloc::Layout
+    pub unsafe fn try_new_with_address_gaps<I>(
+        metadata: NonNull<u8>,
+        base: NonNull<u8>,
+        num_blocks: usize,
+        gaps: I,
+    ) -> Result<RawBuddy<BLK_SIZE, LEVELS>, AllocInitError>
+    where
+        I: IntoIterator<Item = Range<NonZeroUsize>>,
+    {
         let num_blocks = NonZeroUsize::new(num_blocks).ok_or(AllocInitError::InvalidConfig)?;
         let min_block_size = Buddy::<BLK_SIZE, LEVELS, Raw>::min_block_size()?;
         let meta_layout = Buddy::<BLK_SIZE, LEVELS, Raw>::metadata_layout_impl(num_blocks)?;
@@ -850,35 +995,71 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> RawBuddy<BLK_SIZE, LEVELS> {
 
         let base = BasePtr { ptr: base };
 
-        // Initialize the top-level free list by emplacing links in each block.
-        for block_idx in 0..num_blocks.get() {
-            let block_offset = block_idx.checked_mul(levels[0].block_size).unwrap();
+        // Widen the gaps so their boundaries lie on block boundaries.
+        let mut gaps = AlignedRanges::new(gaps.into_iter(), min_block_size);
+        let mut gap: Option<Range<NonZeroUsize>> = gaps.next();
 
-            let block_addr =
-                NonZeroUsize::new(base.ptr.addr().get().checked_add(block_offset).unwrap())
-                    .unwrap();
+        let mut curs = base.ptr.addr().get();
+        let limit = base
+            .ptr
+            .addr()
+            .get()
+            .checked_add(region_layout.size())
+            .unwrap();
 
-            // All blocks except the first link to the previous block.
-            let prev = (block_idx > 0).then(|| {
-                let prev_addr = block_addr.get().checked_sub(levels[0].block_size).unwrap();
-                NonZeroUsize::new(prev_addr).unwrap()
-            });
+        let min_pow = min_block_size.trailing_zeros();
+        let max_pow = BLK_SIZE.trailing_zeros();
 
-            // Safe unchecked sub: num_blocks is nonzero
-            let is_not_last = block_idx < num_blocks.get() - 1;
+        while curs < limit {
+            let curs_pow = curs.trailing_zeros().max(min_pow).min(max_pow);
+            let curs_align = 1 << curs_pow;
+            let curs_ofs = curs - base.ptr.addr().get();
 
-            // All blocks except the last link to the next block.
-            let next = is_not_last.then(|| {
-                let next_addr = block_addr.get().checked_add(levels[0].block_size).unwrap();
-                NonZeroUsize::new(next_addr).unwrap()
-            });
+            let (in_gap, block_end) = match gap {
+                None => (false, limit),
+                Some(ref g) => {
+                    if curs < g.start.get() {
+                        (false, g.start.get())
+                    } else if curs < g.end.get() {
+                        (true, g.end.get())
+                    } else {
+                        gap = gaps.next();
+                        continue;
+                    }
+                }
+            };
 
-            unsafe {
-                base.init_double_link_at(block_addr, DoubleBlockLink { prev, next });
+            let block_space = block_end - curs;
+            let block_space_po2 = 1 << (usize::BITS - (block_space.leading_zeros() + 1));
+            let block_size: usize = cmp::min(block_space_po2, curs_align);
+
+            let init_level = (max_pow - curs_pow) as usize;
+            let target_level = (max_pow - block_size.trailing_zeros()) as usize;
+
+            for lv in init_level..target_level {
+                // Mark the block as split.
+                let split_bit = levels[lv].index_of(curs_ofs);
+                if let Some(s) = levels[lv].splits.as_mut() {
+                    s.set(split_bit, true);
+                }
             }
-        }
 
-        levels[0].free_list = Some(base.ptr.addr());
+            // All larger blocks containing the target block are now marked as
+            // split.
+            if in_gap {
+                // If the block is in a gap, toggle its buddy bit to prevent it
+                // from being coalesced if its buddy is deallocated.
+                let buddy_bit = levels[target_level].buddy_bit(curs_ofs);
+                levels[target_level].buddies.toggle(buddy_bit);
+            } else {
+                // If not in a gap, this block should be added to its level's free list.
+                unsafe {
+                    levels[target_level].free_list_push(base, NonZeroUsize::new(curs).unwrap());
+                }
+            }
+
+            curs += block_size;
+        }
 
         Ok(RawBuddy {
             base,
@@ -886,6 +1067,79 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> RawBuddy<BLK_SIZE, LEVELS> {
             num_blocks,
             levels,
         })
+    }
+}
+
+struct AlignedRanges<I>
+where
+    I: Iterator<Item = Range<NonZeroUsize>>,
+{
+    align: usize,
+    inner: Peekable<I>,
+}
+
+impl<I> AlignedRanges<I>
+where
+    I: Iterator<Item = Range<NonZeroUsize>>,
+{
+    fn new(iter: I, align: usize) -> AlignedRanges<I> {
+        assert!(align.is_power_of_two());
+
+        AlignedRanges {
+            align,
+            inner: iter.peekable(),
+        }
+    }
+}
+
+impl<I> Iterator for AlignedRanges<I>
+where
+    I: Iterator<Item = Range<NonZeroUsize>>,
+{
+    type Item = Range<NonZeroUsize>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut cur = self.inner.next()?;
+        let align = self.align;
+
+        // Align start down.
+        let start = cur.start.get() & !(align - 1);
+
+        let mut end;
+        loop {
+            // Align end up.
+            end = {
+                let less_one = cur.end.get() - 1;
+                let above = less_one
+                    .checked_add(align)
+                    .expect("end overflowed when aligned up");
+                above & !(align - 1)
+            };
+
+            // Peek the next range.
+            let next = match self.inner.peek() {
+                Some(next) => next.clone(),
+                None => break,
+            };
+
+            let next_start = next.start.get() & !(align - 1);
+            if next_start == end {
+                // Merge contiguous ranges. `cur.end` will be aligned up on the
+                // next loop iteration.
+                cur.end = next.end;
+
+                // Consume the peeked item.
+                let _ = self.inner.next();
+            } else {
+                // The ranges are discontiguous.
+                break;
+            }
+        }
+
+        cur.start = NonZeroUsize::new(start).expect("start aligned down to null");
+        cur.end = NonZeroUsize::new(end).unwrap();
+
+        Some(cur)
     }
 }
 
@@ -1094,6 +1348,46 @@ mod tests {
                     allocator.deallocate(alloc.cast());
                 }
             }
+        }
+    }
+
+    #[test]
+    fn one_level_gaps() {
+        type Alloc = Buddy<16, 1, Global>;
+        let layout = Layout::from_size_align(1, 1).unwrap();
+
+        for gaps in std::vec![[0..1], [15..16]] {
+            let mut allocator = Alloc::try_new_with_offset_gaps(1, gaps).unwrap();
+            allocator.allocate(layout).unwrap_err();
+        }
+    }
+
+    #[test]
+    fn two_level_gaps() {
+        type Alloc = Buddy<32, 2, Global>;
+        let one_byte = Layout::from_size_align(1, 1).unwrap();
+        let half = Layout::from_size_align(16, 16).unwrap();
+        let full = Layout::from_size_align(32, 32).unwrap();
+
+        for gaps in std::vec![[0..32], [0..17], [15..32], [8..24]] {
+            let mut allocator = Alloc::try_new_with_offset_gaps(1, gaps).unwrap();
+            allocator.allocate(one_byte).unwrap_err();
+        }
+
+        for gaps in std::vec![[0..16], [16..32]] {
+            let mut allocator = Alloc::try_new_with_offset_gaps(1, gaps).unwrap();
+
+            // Can't allocate the entire region.
+            allocator.allocate(full).unwrap_err();
+
+            // Can allocate the half-region not covered by the gap.
+            let a = allocator.allocate(half).unwrap();
+            // No memory left after that allocation.
+            allocator.allocate(one_byte).unwrap_err();
+            unsafe { allocator.deallocate(a.cast()) };
+
+            // Ensure freeing doesn't cause coalescing into the gap.
+            allocator.allocate(full).unwrap_err();
         }
     }
 }

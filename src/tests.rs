@@ -1,7 +1,7 @@
 #![cfg(test)]
 extern crate std;
 
-use core::mem;
+use core::{mem, ops::Range};
 
 use crate::{
     bump::Bump,
@@ -58,20 +58,37 @@ impl QcAllocator for Slab<Global> {
 }
 
 #[derive(Clone, Debug)]
-struct BuddyParams {
+struct BuddyParams<const BLK_SIZE: usize> {
     num_blocks: usize,
+    gaps: Vec<Range<usize>>,
 }
 
-impl Arbitrary for BuddyParams {
+impl<const BLK_SIZE: usize> Arbitrary for BuddyParams<BLK_SIZE> {
     fn arbitrary(g: &mut Gen) -> Self {
-        BuddyParams {
-            num_blocks: cmp::max(usize::arbitrary(g) % g.size(), 1),
-        }
+        let num_blocks = cmp::max(usize::arbitrary(g) % g.size(), 1);
+
+        let gaps = if bool::arbitrary(g) {
+            let mut v = Vec::<usize>::arbitrary(g);
+
+            v = v
+                .into_iter()
+                .map(|ofs| ofs % (BLK_SIZE * num_blocks))
+                .take(usize::arbitrary(g) % 2 * num_blocks)
+                .collect();
+
+            v.sort();
+
+            v.chunks_exact(2).map(|pair| pair[0]..pair[1]).collect()
+        } else {
+            Vec::new()
+        };
+
+        BuddyParams { num_blocks, gaps }
     }
 }
 
 impl<const BLK_SIZE: usize, const LEVELS: usize> QcAllocator for Buddy<BLK_SIZE, LEVELS, Global> {
-    type Params = BuddyParams;
+    type Params = BuddyParams<BLK_SIZE>;
 
     fn with_params(params: Self::Params) -> Result<Self, AllocInitError> {
         Buddy::try_new(params.num_blocks)
@@ -95,7 +112,7 @@ impl Arbitrary for BumpParams {
     fn arbitrary(g: &mut Gen) -> Self {
         BumpParams {
             layout: Layout::from_size_align(
-                usize::arbitrary(g) % 8192,
+                cmp::max(usize::arbitrary(g) % 8192, 1),
                 1 << (usize::arbitrary(g) % 5),
             )
             .unwrap(),
@@ -172,8 +189,10 @@ struct AllocatorChecker<A: QcAllocator> {
     num_ops: u32,
     // Layout of single items.
     layout: Layout,
+    pre_run_hook: Option<Box<dyn Fn() -> bool>>,
     post_allocate_hook: Option<Box<dyn Fn(u32, usize, &mut AllocResult) -> bool>>,
     pre_deallocate_hook: Option<Box<dyn Fn(&Allocation) -> bool>>,
+    post_run_hook: Option<Box<dyn Fn() -> bool>>,
 }
 
 type AllocResult = Result<NonNull<[u8]>, AllocError>;
@@ -185,13 +204,19 @@ impl<A: QcAllocator> AllocatorChecker<A> {
             allocations: Vec::with_capacity(capacity),
             num_ops: 0,
             layout: Layout::new::<u8>(),
+            pre_run_hook: None,
             post_allocate_hook: None,
             pre_deallocate_hook: None,
+            post_run_hook: None,
         })
     }
 
     fn set_layout_of<T>(&mut self) {
         self.layout = Layout::new::<T>();
+    }
+
+    fn set_pre_run_hook(&mut self, hook: impl Fn() -> bool + 'static) {
+        self.pre_run_hook = Some(Box::new(hook));
     }
 
     fn set_post_allocate_hook(
@@ -203,6 +228,10 @@ impl<A: QcAllocator> AllocatorChecker<A> {
 
     fn set_pre_deallocate_hook(&mut self, hook: impl Fn(&Allocation) -> bool + 'static) {
         self.pre_deallocate_hook = Some(Box::new(hook));
+    }
+
+    fn set_post_run_hook(&mut self, hook: impl Fn() -> bool + 'static) {
+        self.post_run_hook = Some(Box::new(hook));
     }
 
     fn do_op(&mut self, op: AllocatorOp) -> bool {
@@ -264,7 +293,27 @@ impl<A: QcAllocator> AllocatorChecker<A> {
     }
 
     fn run(&mut self, ops: Vec<AllocatorOp>) -> bool {
-        ops.into_iter().all(|op| self.do_op(op))
+        if !self.pre_run_hook.as_mut().map(|f| f()).unwrap_or(true) {
+            return false;
+        }
+
+        if !ops.into_iter().all(|op| self.do_op(op)) {
+            return false;
+        }
+
+        // Free any outstanding allocations.
+        for alloc in self.allocations.drain(..) {
+            unsafe {
+                self.allocator
+                    .deallocate(alloc.ptr.cast::<u8>(), alloc.layout)
+            };
+        }
+
+        if !self.post_run_hook.as_mut().map(|f| f()).unwrap_or(true) {
+            return false;
+        }
+
+        true
     }
 }
 
