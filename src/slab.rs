@@ -42,14 +42,15 @@ use crate::core::ptr::NonNullStrict;
 use crate::{layout_error, AllocInitError, BackingAllocator, BasePtr, BlockLink, Raw};
 
 /// A slab allocator.
-pub struct Slab<const BLK_SIZE: usize, A: BackingAllocator> {
+pub struct Slab<A: BackingAllocator> {
     base: BasePtr,
+    block_size: usize,
     num_blocks: usize,
     free_list: Option<NonZeroUsize>,
     backing_allocator: A,
 }
 
-impl<const BLK_SIZE: usize> Slab<BLK_SIZE, Raw> {
+impl Slab<Raw> {
     /// Constructs a new `Slab` from a raw pointer.
     ///
     /// For a discussion of slab allocation, see the [module-level
@@ -71,14 +72,17 @@ impl<const BLK_SIZE: usize> Slab<BLK_SIZE, Raw> {
     /// [`Self::region_layout(num_blocks)`]: Slab::region_layout
     pub unsafe fn new_raw(
         region: NonNull<u8>,
+        block_size: usize,
         num_blocks: usize,
-    ) -> Result<Slab<BLK_SIZE, Raw>, AllocInitError> {
-        unsafe { RawSlab::try_new(region, num_blocks).map(|s| s.with_backing_allocator(Raw)) }
+    ) -> Result<Slab<Raw>, AllocInitError> {
+        unsafe {
+            RawSlab::try_new(region, block_size, num_blocks).map(|s| s.with_backing_allocator(Raw))
+        }
     }
 }
 
 #[cfg(all(any(feature = "alloc", test), not(feature = "unstable")))]
-impl<const BLK_SIZE: usize> Slab<BLK_SIZE, Global> {
+impl Slab<Global> {
     /// Attempts to construct a new `Slab` backed by the global allocator.
     ///
     /// In particular, the memory managed by this `Slab` is allocated from the
@@ -92,9 +96,9 @@ impl<const BLK_SIZE: usize> Slab<BLK_SIZE, Global> {
     ///
     /// [`Self::region_layout(num_blocks)`]: Slab::region_layout
     #[cfg_attr(docs_rs, doc(cfg(feature = "alloc")))]
-    pub fn try_new(num_blocks: usize) -> Result<Slab<BLK_SIZE, Global>, AllocInitError> {
-        let region_layout =
-            Self::region_layout(num_blocks).map_err(|_| AllocInitError::InvalidConfig)?;
+    pub fn try_new(block_size: usize, num_blocks: usize) -> Result<Slab<Global>, AllocInitError> {
+        let region_layout = Self::region_layout(block_size, num_blocks)
+            .map_err(|_| AllocInitError::InvalidConfig)?;
 
         unsafe {
             let region_ptr = if region_layout.size() == 0 {
@@ -105,14 +109,14 @@ impl<const BLK_SIZE: usize> Slab<BLK_SIZE, Global> {
                 NonNull::new(region_raw).ok_or(AllocInitError::AllocFailed(region_layout))?
             };
 
-            RawSlab::<BLK_SIZE>::try_new(region_ptr, num_blocks)
+            RawSlab::try_new(region_ptr, block_size, num_blocks)
                 .map(|s| s.with_backing_allocator(Global))
         }
     }
 }
 
 #[cfg(all(any(feature = "alloc", test), feature = "unstable"))]
-impl<const BLK_SIZE: usize> Slab<BLK_SIZE, Global> {
+impl Slab<Global> {
     /// Attempts to construct a new `Slab` backed by the global allocator.
     ///
     /// In particular, the memory managed by this `Slab` is allocated from the
@@ -126,13 +130,13 @@ impl<const BLK_SIZE: usize> Slab<BLK_SIZE, Global> {
     ///
     /// [`Self::region_layout(num_blocks)`]: Slab::region_layout
     #[cfg_attr(docs_rs, doc(cfg(feature = "alloc")))]
-    pub fn try_new(num_blocks: usize) -> Result<Slab<BLK_SIZE, Global>, AllocInitError> {
-        Self::try_new_in(num_blocks, Global)
+    pub fn try_new(block_size: usize, num_blocks: usize) -> Result<Slab<Global>, AllocInitError> {
+        Self::try_new_in(block_size, num_blocks, Global)
     }
 }
 
 #[cfg(feature = "unstable")]
-impl<const BLK_SIZE: usize, A> Slab<BLK_SIZE, A>
+impl Slab<A>
 where
     A: Allocator,
 {
@@ -150,9 +154,10 @@ where
     /// [`Self::region_layout(num_blocks)`]: Slab::region_layout
     #[cfg_attr(docs_rs, doc(cfg(feature = "unstable")))]
     pub fn try_new_in(
+        block_size: usize,
         num_blocks: usize,
         backing_allocator: A,
-    ) -> Result<Slab<BLK_SIZE, A>, AllocInitError> {
+    ) -> Result<Slab<A>, AllocInitError> {
         let region_layout =
             Self::region_layout(num_blocks).map_err(|_| AllocInitError::InvalidConfig)?;
 
@@ -166,7 +171,7 @@ where
                     .cast()
             };
 
-            match RawSlab::<BLK_SIZE>::try_new(region_ptr, num_blocks) {
+            match RawSlab::try_new(region_ptr, num_blocks) {
                 Ok(s) => Ok(s.with_backing_allocator(backing_allocator)),
                 Err(e) => {
                     if region_layout.size() != 0 {
@@ -180,7 +185,7 @@ where
     }
 }
 
-impl<const BLK_SIZE: usize, A> Slab<BLK_SIZE, A>
+impl<A> Slab<A>
 where
     A: BackingAllocator,
 {
@@ -191,21 +196,34 @@ where
     ///
     /// Returns `Err` if the total size and alignment of the region cannot be
     /// represented as a [`Layout`].
-    pub fn region_layout(num_blocks: usize) -> Result<Layout, LayoutError> {
-        let total_size = BLK_SIZE.checked_mul(num_blocks).ok_or_else(layout_error)?;
+    pub fn region_layout(block_size: usize, num_blocks: usize) -> Result<Layout, LayoutError> {
+        let total_size = block_size
+            .checked_mul(num_blocks)
+            .ok_or_else(layout_error)?;
 
-        Layout::from_size_align(total_size, BLK_SIZE)
+        let align = 1_usize
+            .checked_shl(block_size.trailing_zeros())
+            .ok_or(layout_error())?;
+
+        Layout::from_size_align(total_size, align)
     }
 
-    /// Attempts to allocate a fixed-size block from the slab.
+    /// Attempts to allocate a block of memory from the slab.
     ///
     /// The returned block is guaranteed to be aligned to `1 <<
-    /// BLK_SIZE.trailing_zeros()` bytes.
+    /// block_size.trailing_zeros()` bytes.
     ///
     /// # Errors
     ///
-    /// Returns `Err` if no blocks are available.
-    pub fn allocate_block(&mut self) -> Result<NonNull<[u8; BLK_SIZE]>, AllocError> {
+    /// Returns `Err` if any of the following are true:
+    /// - Either of `layout.size()` or `layout.align()` are greater than
+    ///   `block_size`.
+    /// - No blocks are available.
+    pub fn allocate(&mut self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        if layout.size() > self.block_size || layout.align() > self.block_size {
+            return Err(AllocError);
+        }
+
         let old_head = self.free_list.take().ok_or(AllocError)?;
 
         unsafe {
@@ -213,30 +231,7 @@ where
             self.free_list = link_mut.next.take();
         }
 
-        let block_ptr = self.base.with_addr(old_head).cast::<[u8; BLK_SIZE]>();
-
-        Ok(block_ptr)
-    }
-
-    /// Attempts to allocate a block of memory from the slab.
-    ///
-    /// The returned block is guaranteed to be aligned to `1 <<
-    /// BLK_SIZE.trailing_zeros()` bytes.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` if any of the following are true:
-    /// - Either of `layout.size()` or `layout.align()` are greater than
-    ///   `BLK_SIZE`.
-    /// - No blocks are available.
-    pub fn allocate(&mut self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
-        if layout.size() > BLK_SIZE || layout.align() > BLK_SIZE {
-            return Err(AllocError);
-        }
-
-        let block = self.allocate_block()?;
-
-        Ok(self.base.with_addr_and_size(block.addr(), layout.size()))
+        Ok(self.base.with_addr_and_size(old_head, layout.size()))
     }
 
     /// Deallocates the memory referenced by `ptr`.
@@ -256,26 +251,26 @@ where
     }
 }
 
-impl<const BLK_SIZE: usize, A> fmt::Debug for Slab<BLK_SIZE, A>
+impl<A> fmt::Debug for Slab<A>
 where
     A: BackingAllocator,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Slab")
             .field("base", &self.base.ptr)
-            .field("BLK_SIZE", &BLK_SIZE)
+            .field("block_size", &self.block_size)
             .field("num_blocks", &self.num_blocks)
             .finish()
     }
 }
 
-impl<const BLK_SIZE: usize, A> Drop for Slab<BLK_SIZE, A>
+impl<A> Drop for Slab<A>
 where
     A: BackingAllocator,
 {
     fn drop(&mut self) {
         // Safe unwrap: this layout was checked when the allocator was constructed.
-        let region_layout = Self::region_layout(self.num_blocks).unwrap();
+        let region_layout = Self::region_layout(self.block_size, self.num_blocks).unwrap();
 
         if region_layout.size() != 0 {
             unsafe {
@@ -286,13 +281,14 @@ where
     }
 }
 
-struct RawSlab<const BLK_SIZE: usize> {
+struct RawSlab {
     base: BasePtr,
+    block_size: usize,
     num_blocks: usize,
     free_list: Option<NonZeroUsize>,
 }
 
-impl<const BLK_SIZE: usize> RawSlab<BLK_SIZE> {
+impl RawSlab {
     /// Attempts to construct a new `Slab` from a raw pointer.
     ///
     /// # Safety
@@ -302,14 +298,15 @@ impl<const BLK_SIZE: usize> RawSlab<BLK_SIZE> {
     /// for reads and writes for the entire size indicated by that `Layout`.
     unsafe fn try_new(
         region: NonNull<u8>,
+        block_size: usize,
         num_blocks: usize,
-    ) -> Result<RawSlab<BLK_SIZE>, AllocInitError> {
-        if BLK_SIZE < mem::size_of::<BlockLink>() {
+    ) -> Result<RawSlab, AllocInitError> {
+        if block_size < mem::size_of::<BlockLink>() {
             return Err(AllocInitError::InvalidConfig);
         }
 
         // Ensure the region size fits in a usize.
-        let layout = Slab::<BLK_SIZE, Raw>::region_layout(num_blocks)
+        let layout = Slab::<Raw>::region_layout(block_size, num_blocks)
             .map_err(|_| AllocInitError::InvalidConfig)?;
 
         // Ensure pointer calculations will not overflow.
@@ -327,19 +324,19 @@ impl<const BLK_SIZE: usize> RawSlab<BLK_SIZE> {
         let base = BasePtr { ptr: region };
 
         // Initialize the free list by emplacing links in each block.
-        for block_addr in (region.addr().get()..region_end.get()).step_by(BLK_SIZE) {
+        for block_addr in (region.addr().get()..region_end.get()).step_by(block_size) {
             // SAFETY: block_addr is a step between region.addr() and
             // region_end, both of which are nonzero.
             let block_addr = unsafe { NonZeroUsize::new_unchecked(block_addr) };
 
             // Safe unchecked sub: region_end is nonzero.
-            let is_not_last = block_addr.get() < region_end.get() - BLK_SIZE;
+            let is_not_last = block_addr.get() < region_end.get() - block_size;
 
             let next = is_not_last.then(|| {
-                // Safe unchecked add: block_addr is at least BLK_SIZE less than
+                // Safe unchecked add: block_addr is at least block_size less than
                 // region_end, as region_end is the upper bound of the iterator
-                // and BLK_SIZE is the step.
-                let next_addr = block_addr.get() + BLK_SIZE;
+                // and block_size is the step.
+                let next_addr = block_addr.get() + block_size;
 
                 // SAFETY: next_addr is known to be greater than block_addr and
                 // not to have overflown.
@@ -351,17 +348,16 @@ impl<const BLK_SIZE: usize> RawSlab<BLK_SIZE> {
 
         Ok(RawSlab {
             base,
+            block_size,
             num_blocks,
             free_list: (num_blocks > 0).then(|| base.ptr.addr()),
         })
     }
 
-    fn with_backing_allocator<A: BackingAllocator>(
-        self,
-        backing_allocator: A,
-    ) -> Slab<BLK_SIZE, A> {
+    fn with_backing_allocator<A: BackingAllocator>(self, backing_allocator: A) -> Slab<A> {
         Slab {
             base: self.base,
+            block_size: self.block_size,
             num_blocks: self.num_blocks,
             free_list: self.free_list,
             backing_allocator,
@@ -375,23 +371,22 @@ mod tests {
 
     #[test]
     fn too_small_block_size_errors() {
-        Slab::<0, Global>::try_new(0).unwrap_err();
-        Slab::<0, Global>::try_new(1).unwrap_err();
-        Slab::<1, Global>::try_new(0).unwrap_err();
-        Slab::<1, Global>::try_new(1).unwrap_err();
-        Slab::<{ mem::size_of::<BlockLink>() - 1 }, Global>::try_new(0).unwrap_err();
-        Slab::<{ mem::size_of::<BlockLink>() - 1 }, Global>::try_new(1).unwrap_err();
+        Slab::<Global>::try_new(0, 0).unwrap_err();
+        Slab::<Global>::try_new(0, 1).unwrap_err();
+        Slab::<Global>::try_new(1, 0).unwrap_err();
+        Slab::<Global>::try_new(1, 1).unwrap_err();
+        Slab::<Global>::try_new(mem::size_of::<BlockLink>() - 1, 0).unwrap_err();
+        Slab::<Global>::try_new(mem::size_of::<BlockLink>() - 1, 1).unwrap_err();
     }
 
     #[test]
     fn overflow_address_space_errors() {
-        Slab::<{ usize::MAX }, Global>::try_new(2).unwrap_err();
+        Slab::<Global>::try_new(usize::MAX, 2).unwrap_err();
     }
 
     #[test]
     fn zero_blocks() {
-        let mut slab = Slab::<128, Global>::try_new(0).unwrap();
-        slab.allocate_block().unwrap_err();
+        let mut slab = Slab::<Global>::try_new(128, 0).unwrap();
         slab.allocate(Layout::from_size_align(0, 1).unwrap())
             .unwrap_err();
     }
@@ -399,11 +394,7 @@ mod tests {
     #[test]
     fn one_block() {
         const BLK_SIZE: usize = 128;
-        let mut slab = Slab::<BLK_SIZE, Global>::try_new(1).unwrap();
-
-        let a = slab.allocate_block().unwrap();
-        slab.allocate_block().unwrap_err();
-        unsafe { slab.deallocate(a.cast()) };
+        let mut slab = Slab::<Global>::try_new(BLK_SIZE, 1).unwrap();
 
         let layout = Layout::from_size_align(0, 1).unwrap();
         let b = slab.allocate(layout).unwrap();
@@ -418,13 +409,14 @@ mod tests {
     fn two_blocks() {
         const BLK_SIZE: usize = 128;
 
-        let mut slab = Slab::<BLK_SIZE, Global>::try_new(2).unwrap();
+        let mut slab = Slab::<Global>::try_new(BLK_SIZE, 2).unwrap();
+        let layout = Layout::from_size_align(1, 1).unwrap();
 
         // Allocate a, b
         // Free a, b
-        let a = slab.allocate_block().unwrap();
-        let b = slab.allocate_block().unwrap();
-        slab.allocate_block().unwrap_err();
+        let a = slab.allocate(layout).unwrap();
+        let b = slab.allocate(layout).unwrap();
+        slab.allocate(layout).unwrap_err();
         unsafe {
             slab.deallocate(a.cast());
             slab.deallocate(b.cast());
@@ -432,9 +424,9 @@ mod tests {
 
         // Allocate a, b
         // Free b, a
-        let a = slab.allocate_block().unwrap();
-        let b = slab.allocate_block().unwrap();
-        slab.allocate_block().unwrap_err();
+        let a = slab.allocate(layout).unwrap();
+        let b = slab.allocate(layout).unwrap();
+        slab.allocate(layout).unwrap_err();
         unsafe {
             slab.deallocate(b.cast());
             slab.deallocate(a.cast());

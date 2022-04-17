@@ -285,6 +285,15 @@ pub struct Buddy<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator
     backing_allocator: A,
 }
 
+unsafe impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> Send
+    for Buddy<BLK_SIZE, LEVELS, A>
+{
+}
+unsafe impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> Sync
+    for Buddy<BLK_SIZE, LEVELS, A>
+{
+}
+
 impl<const BLK_SIZE: usize, const LEVELS: usize> Buddy<BLK_SIZE, LEVELS, Raw> {
     /// Constructs a new `Buddy` from raw pointers.
     ///

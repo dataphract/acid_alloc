@@ -1,6 +1,8 @@
 #![cfg(test)]
 extern crate std;
 
+use core::mem;
+
 use crate::{
     bump::Bump,
     core::{alloc::Layout, cmp, fmt::Debug, ptr::NonNull, slice},
@@ -26,22 +28,24 @@ trait QcAllocator: Sized {
 
 #[derive(Clone, Debug)]
 struct SlabParams {
+    block_size: usize,
     num_blocks: usize,
 }
 
 impl Arbitrary for SlabParams {
     fn arbitrary(g: &mut Gen) -> Self {
         SlabParams {
+            block_size: cmp::max(mem::size_of::<usize>(), usize::arbitrary(g) % g.size()),
             num_blocks: usize::arbitrary(g) % g.size(),
         }
     }
 }
 
-impl<const BLK_SIZE: usize> QcAllocator for Slab<BLK_SIZE, Global> {
+impl QcAllocator for Slab<Global> {
     type Params = SlabParams;
 
     fn with_params(params: Self::Params) -> Result<Self, AllocInitError> {
-        Slab::try_new(params.num_blocks)
+        Slab::try_new(params.block_size, params.num_blocks)
     }
 
     fn allocate(&mut self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
@@ -300,11 +304,7 @@ where
 #[test]
 fn slab_allocations_are_mutually_exclusive() {
     let mut qc = QuickCheck::new().max_tests(MAX_TESTS);
-    qc.quickcheck(allocations_are_mutually_exclusive::<Slab<8, Global>> as fn(_, _) -> bool);
-    qc.quickcheck(allocations_are_mutually_exclusive::<Slab<16, Global>> as fn(_, _) -> bool);
-    qc.quickcheck(allocations_are_mutually_exclusive::<Slab<32, Global>> as fn(_, _) -> bool);
-    qc.quickcheck(allocations_are_mutually_exclusive::<Slab<64, Global>> as fn(_, _) -> bool);
-    qc.quickcheck(allocations_are_mutually_exclusive::<Slab<128, Global>> as fn(_, _) -> bool);
+    qc.quickcheck(allocations_are_mutually_exclusive::<Slab<Global>> as fn(_, _) -> bool);
 }
 
 #[test]
