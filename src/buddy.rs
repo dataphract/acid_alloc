@@ -234,6 +234,39 @@ impl BuddyLevel {
 /// Attempting to construct a `Buddy` whose const parameters violate
 /// these invariants will result in an error.
 ///
+/// # Gaps
+///
+/// A `Buddy` can be configured to leave certain ranges of the managed region
+/// untouched. Such regions are never written to or read from by the allocator.
+///
+/// For example, consider a 16 KiB region of physical memory in which the region
+/// between 4-8 KiB is reserved for memory-mapped I/O.
+///
+/// ```text
+///   | RAM            | I/O            | RAM            | RAM            |
+/// 0x0000           0x1000           0x2000            0x3000          0x4000
+/// ```
+///
+/// By initializing a `Buddy` with a gap of `0x1000..0x2000`, the I/O region is
+/// safely excluded from allocation.
+///
+/// ```no_run
+/// # use core::num::NonZeroUsize;
+/// # use acid_alloc::{Buddy, Raw};
+/// # let metadata = unimplemented!();
+/// # let region = unimplemented!();
+/// let gap_start = NonZeroUsize::new(0x1000).unwrap();
+/// let gap_end = NonZeroUsize::new(0x2000).unwrap();
+/// let alloc: Buddy<16384, 3, Raw> = unsafe {
+///     Buddy::new_raw_with_address_gaps(metadata, region, 1, [gap_start..gap_end]).unwrap()
+/// };
+/// ```
+///
+/// ```text
+///   | Free           | Unavailable    | Free                            |
+/// 0x0000           0x1000           0x2000            0x3000          0x4000
+/// ```
+///
 /// # Example
 ///
 /// ```
@@ -327,10 +360,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> Buddy<BLK_SIZE, LEVELS, Raw> {
         region: NonNull<u8>,
         num_blocks: usize,
     ) -> Result<Buddy<BLK_SIZE, LEVELS, Raw>, AllocInitError> {
-        unsafe {
-            RawBuddy::<BLK_SIZE, LEVELS>::try_new(metadata, region, num_blocks)
-                .map(|p| p.with_backing_allocator(Raw))
-        }
+        unsafe { Self::new_raw_with_address_gaps(metadata, region, num_blocks, iter::empty()) }
     }
 
     /// Constructs a new `Buddy` from raw pointers, with gaps specified by
@@ -381,36 +411,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> Buddy<BLK_SIZE, LEVELS, Global>
     ///
     /// If allocation fails, returns `Err(AllocError)`.
     pub fn try_new(num_blocks: usize) -> Result<Buddy<BLK_SIZE, LEVELS, Global>, AllocInitError> {
-        let region_layout = Self::region_layout(num_blocks)?;
-        let metadata_layout = Self::metadata_layout(num_blocks)?;
-
-        let num_blocks = NonZeroUsize::new(num_blocks).ok_or(AllocInitError::InvalidConfig)?;
-
-        unsafe {
-            let region_ptr = {
-                let raw = alloc::alloc::alloc(region_layout);
-                NonNull::new(raw).ok_or(AllocInitError::AllocFailed(region_layout))?
-            };
-
-            let metadata_ptr = {
-                let raw = alloc::alloc::alloc(metadata_layout);
-                NonNull::new(raw).ok_or_else(|| {
-                    alloc::alloc::dealloc(region_ptr.as_ptr(), region_layout);
-                    AllocInitError::AllocFailed(metadata_layout)
-                })?
-            };
-
-            match RawBuddy::<BLK_SIZE, LEVELS>::try_new(metadata_ptr, region_ptr, num_blocks.get())
-            {
-                Ok(b) => Ok(b.with_backing_allocator(Global)),
-                Err(e) => {
-                    alloc::alloc::dealloc(region_ptr.as_ptr(), region_layout);
-                    alloc::alloc::dealloc(metadata_ptr.as_ptr(), metadata_layout);
-
-                    Err(e)
-                }
-            }
-        }
+        Self::try_new_with_offset_gaps(num_blocks, iter::empty())
     }
 
     /// Attempts to construct a new `Buddy` backed by the global allocator, with
@@ -475,15 +476,19 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> Buddy<BLK_SIZE, LEVELS, Global>
 #[cfg(all(any(feature = "alloc", test), feature = "unstable"))]
 impl<const BLK_SIZE: usize, const LEVELS: usize> Buddy<BLK_SIZE, LEVELS, Global> {
     /// Attempts to construct a new `Buddy` backed by the global allocator.
-    ///
-    /// # Errors
-    ///
-    /// If allocation fails, this constructor invokes [`handle_alloc_error`].
-    ///
-    /// [`handle_alloc_error`]: alloc::alloc::handle_alloc_error
     #[cfg_attr(docs_rs, doc(cfg(feature = "alloc")))]
     pub fn try_new(num_blocks: usize) -> Result<Buddy<BLK_SIZE, LEVELS, Global>, AllocInitError> {
         Buddy::<BLK_SIZE, LEVELS, Global>::try_new_in(num_blocks, Global)
+    }
+
+    pub fn try_new_with_offset_gaps<I>(
+        num_blocks: usize,
+        gaps: I,
+    ) -> Result<Buddy<BLK_SIZE, LEVELS, Global>, AllocInitError>
+    where
+        I: IntoIterator<Item = Range<usize>>,
+    {
+        Buddy::<BLK_SIZE, LEVELS, Global>::try_new_with_offset_gaps_in(num_blocks, gaps, Global)
     }
 }
 
@@ -499,6 +504,24 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: Allocator> Buddy<BLK_SIZE, L
         num_blocks: usize,
         allocator: A,
     ) -> Result<Buddy<BLK_SIZE, LEVELS, A>, AllocInitError> {
+        Self::try_new_with_offset_gaps_in(num_blocks, iter::empty(), allocator)
+    }
+
+    /// Attempts to construct a new `Buddy` backed by `allocator`, with gaps
+    /// specified by offset ranges.
+    ///
+    /// # Errors
+    ///
+    /// If allocation fails, returns `Err(AllocError)`.
+    #[cfg_attr(docs_rs, doc(cfg(feature = "unstable")))]
+    pub fn try_new_with_offset_gaps_in<I>(
+        num_blocks: usize,
+        gaps: I,
+        allocator: A,
+    ) -> Result<Buddy<BLK_SIZE, LEVELS, A>, AllocInitError>
+    where
+        I: IntoIterator<Item = Range<usize>>,
+    {
         let region_layout = Self::region_layout(num_blocks)?;
         let metadata_layout = Self::metadata_layout(num_blocks)?;
 
@@ -523,8 +546,13 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: Allocator> Buddy<BLK_SIZE, L
             let region_ptr = NonNull::new_unchecked(region.as_ptr() as *mut u8);
             let metadata_ptr = NonNull::new_unchecked(metadata.as_ptr() as *mut u8);
 
-            RawBuddy::<BLK_SIZE, LEVELS>::try_new(metadata_ptr, region_ptr, num_blocks.get())
-                .map(|p| p.with_backing_allocator(allocator))
+            RawBuddy::<BLK_SIZE, LEVELS>::try_new_with_offset_gaps(
+                metadata_ptr,
+                region_ptr,
+                num_blocks.get(),
+                gaps,
+            )
+            .map(|p| p.with_backing_allocator(allocator))
         }
     }
 }
@@ -767,8 +795,14 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> Buddy<BLK_
 
     /// Returns a pointer to the managed region.
     ///
-    /// It is undefined behavior to dereference the returned pointer or upgrade
-    /// it to a reference if there are any outstanding allocations.
+    /// # Safety
+    ///
+    /// Calling this function cannot cause undefined behavior. However:
+    /// - Reading from the returned pointer, including upgrading it to a
+    ///   reference, is undefined behavior if there are any outstanding
+    ///   allocations.
+    /// - Writing to the returned pointer, including upgrading it to a mutable
+    ///   reference, is _always_ undefined behavior.
     pub fn region(&mut self) -> NonNull<[u8]> {
         NonNull::new(ptr::slice_from_raw_parts_mut(
             self.base.ptr.as_ptr(),
@@ -877,6 +911,26 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> RawBuddy<BLK_SIZE, LEVELS> {
         num_blocks: usize,
     ) -> Result<RawBuddy<BLK_SIZE, LEVELS>, AllocInitError> {
         unsafe { Self::try_new_with_address_gaps(metadata, base, num_blocks, iter::empty()) }
+    }
+
+    pub unsafe fn try_new_with_offset_gaps<I>(
+        metadata: NonNull<u8>,
+        base: NonNull<u8>,
+        num_blocks: usize,
+        gaps: I,
+    ) -> Result<RawBuddy<BLK_SIZE, LEVELS>, AllocInitError>
+    where
+        I: IntoIterator<Item = Range<usize>>,
+    {
+        let region_addr = base.addr().get();
+
+        let gaps = gaps.into_iter().map(|ofs| {
+            let start = NonZeroUsize::new(region_addr.checked_add(ofs.start).unwrap()).unwrap();
+            let end = NonZeroUsize::new(region_addr.checked_add(ofs.end).unwrap()).unwrap();
+            start..end
+        });
+
+        unsafe { Self::try_new_with_address_gaps(metadata, base, num_blocks, gaps) }
     }
 
     /// Construct a new `RawBuddy` from raw pointers, with internal gaps.
@@ -1029,13 +1083,16 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> RawBuddy<BLK_SIZE, LEVELS> {
                 }
             };
 
+            // Calculate the size of the largest block that will fit before the
+            // next gap boundary.
             let block_space = block_end - curs;
             let block_space_po2 = 1 << (usize::BITS - (block_space.leading_zeros() + 1));
             let block_size: usize = cmp::min(block_space_po2, curs_align);
 
+            // Split all blocks that begin at this cursor position but are too
+            // large to fit before the gap boundary.
             let init_level = (max_pow - curs_pow) as usize;
             let target_level = (max_pow - block_size.trailing_zeros()) as usize;
-
             for lv in init_level..target_level {
                 // Mark the block as split.
                 let split_bit = levels[lv].index_of(curs_ofs);
@@ -1044,11 +1101,9 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> RawBuddy<BLK_SIZE, LEVELS> {
                 }
             }
 
-            // All larger blocks containing the target block are now marked as
-            // split.
             if in_gap {
                 // If the block is in a gap, toggle its buddy bit to prevent it
-                // from being coalesced if its buddy is deallocated.
+                // from being coalesced when its buddy is deallocated.
                 let buddy_bit = levels[target_level].buddy_bit(curs_ofs);
                 levels[target_level].buddies.toggle(buddy_bit);
             } else {
