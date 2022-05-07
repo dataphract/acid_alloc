@@ -1,4 +1,67 @@
-#![doc = include_str!("../README.md")]
+//! Bare metal-friendly allocators.
+//!
+//! ---
+//!
+//! This crate provides allocators that can function without the backing of another
+//! allocator. This makes them suitable for use on bare metal or with OS allocation
+//! facilities like `memmap(2)`/`brk(2)`.
+//!
+//! ## Allocators
+//!
+//! - **[`Buddy`], a binary-buddy allocator**. O(log<sub>2</sub>_levels_) worst-case
+//!   allocation and deallocation. Supports splitting and coalescing blocks by
+//!   powers of 2. Good choice for periodic medium-to-large allocations.
+//! - **[`Bump`], a bump allocator**. O(1) allocation. Extremely fast to allocate and
+//!   flexible in terms of allocation layout, but unable to deallocate individual
+//!   items. Good choice for allocations that will never be deallocated or that will
+//!   be deallocated en masse.
+//! - **[`Slab`], a slab allocator**. O(1) allocation and deallocation. All
+//!   allocated blocks are the same size, making this allocator a good choice when
+//!   allocating many similarly-sized objects.
+//!
+//! ## Features
+//!
+//! All allocators provided by this crate are available in a `#![no_std]`,
+//! `#![cfg(no_global_oom_handling)]` environment. Additional functionality is
+//! available when enabling feature flags:
+//!
+//! <table>
+//!  <tr>
+//!   <th>Flag</th>
+//!   <th>Default?</th>
+//!   <th>Requires nightly?</th>
+//!   <th>Description</th>
+//!  </tr>
+//!  <tr><!-- sptr -->
+//!   <td><code>sptr</code></td>
+//!   <td>Yes</td>
+//!   <td>No</td>
+//!   <td>
+//!    Uses the <a href="https://crates.io/crates/sptr"><code>sptr</code></a> polyfill for Strict Provenance.
+//!   </td>
+//!  </tr>
+//!  <tr>
+//!   <td><code>unstable</code></td>
+//!   <td>No</td>
+//!   <td>Yes</td>
+//!   <td>
+//!    Exposes constructors for allocators backed by implementors of the
+//!    unstable<code>Allocator</code> trait, and enables the internal use of
+//!    nightly-only Rust features. Obviates <code>sptr</code>.
+//!   </td>
+//!  </tr>
+//!  <tr>
+//!   <td><code>alloc</code></td>
+//!   <td>No</td>
+//!   <td>No</td>
+//!   <td>
+//!    Exposes constructors for allocators backed by the global allocator.
+//!   </td>
+//!  </tr>
+//! </table>
+//!
+//! [`sptr`]: https://crates.io/crates/sptr
+
 #![no_std]
 #![warn(missing_debug_implementations)]
 #![warn(missing_docs)]
@@ -11,6 +74,9 @@
 // This is necessary to allow `sptr` and `crate::core` to shadow methods
 // provided by unstable features.
 #![allow(unstable_name_collisions)]
+
+#[cfg(test)]
+extern crate std;
 
 macro_rules! requires_sptr_or_unstable {
     ($($it:item)*) => {
@@ -28,6 +94,7 @@ compile_error!("At least one of these crate features must be enabled: [\"sptr\",
 extern crate alloc;
 
 requires_sptr_or_unstable! {
+    mod base;
     mod bitmap;
     pub mod buddy;
     pub mod bump;
@@ -44,21 +111,22 @@ requires_sptr_or_unstable! {
         pub use core::{alloc, cmp, fmt, mem, num, ptr, slice, sync};
     }
 
-    use crate::core::{
-        alloc::{Layout, LayoutError},
-        num::NonZeroUsize,
-        ptr::{self, NonNull},
+    use crate::{
+        base::{BasePtr, BlockLink, DoubleBlockLink},
+        core::{
+            alloc::{Layout, LayoutError},
+            ptr::NonNull,
+        },
     };
 
     #[cfg(feature = "unstable")]
     use crate::core::alloc::Allocator;
 
-    #[cfg(not(feature = "unstable"))]
-    use crate::core::ptr::{NonNullStrict, Strict};
 
     #[doc(inline)]
-    pub use crate::{buddy::Buddy, core::alloc::AllocError, slab::Slab};
+    pub use crate::{buddy::Buddy, bump::Bump, core::alloc::AllocError, slab::Slab};
 
+    #[cfg(not(feature = "unstable"))]
     pub(crate) fn layout_error() -> LayoutError {
         // HACK: LayoutError is #[non_exhaustive], so it can't be
         // constructed outside the standard library. As a workaround,
@@ -91,138 +159,6 @@ requires_sptr_or_unstable! {
         /// would not fit at the provided address, i.e., pointer calculations
         /// would overflow.
         InvalidLocation,
-    }
-
-    /// A pointer to the base of the region of memory managed by an allocator.
-    #[derive(Copy, Clone, Debug)]
-    struct BasePtr {
-        ptr: NonNull<u8>,
-    }
-
-    impl BasePtr {
-        /// Calculates the offset from `self` to `block`.
-        fn offset_to(self, block: NonZeroUsize) -> usize {
-            block.get().checked_sub(self.ptr.addr().get()).unwrap()
-        }
-
-        /// Initializes a `BlockLink` at the given address.
-        ///
-        /// # Safety
-        ///
-        /// The caller must uphold the following invariants:
-        /// - `addr` must be a properly aligned address for `BlockLink` values.
-        /// - The memory at `addr` must be within the provenance of `self` and valid
-        ///   for reads and writes for `size_of::<BlockLink>()` bytes.
-        /// - The memory at `addr` must be unallocated by the associated allocator.
-        #[inline]
-        unsafe fn init_link_at(self, addr: NonZeroUsize, link: BlockLink) {
-            unsafe {
-                self.with_addr(addr)
-                    .cast::<BlockLink>()
-                    .as_ptr()
-                    .write(link)
-            };
-        }
-
-        /// Initializes a `DoubleBlockLink` at the given address.
-        ///
-        /// # Safety
-        ///
-        /// The caller must uphold the following invariants:
-        /// - `addr` must be a properly aligned address for `DoubleBlockLink` values.
-        /// - The memory at `addr` must be within the provenance of `self` and valid
-        ///   for reads and writes for `size_of::<DoubleBlockLink>()` bytes.
-        /// - The memory at `addr` must be unallocated by the associated allocator.
-        #[inline]
-        unsafe fn init_double_link_at(self, addr: NonZeroUsize, link: DoubleBlockLink) {
-            unsafe {
-                self.with_addr(addr)
-                    .cast::<DoubleBlockLink>()
-                    .as_ptr()
-                    .write(link)
-            };
-        }
-
-        /// Returns a mutable reference to the `BlockLink` at `link`.
-        ///
-        /// # Safety
-        ///
-        /// The caller must uphold the following invariants:
-        /// - `link` must be a properly aligned address for `BlockLink` values.
-        /// - The memory at `link` must contain a properly initialized `BlockLink` value.
-        /// - The memory at `link` must be within the provenance of `self` and
-        ///   unallocated by the associated allocator.
-        #[inline]
-        unsafe fn link_mut<'a>(self, link: NonZeroUsize) -> &'a mut BlockLink {
-            unsafe { self.ptr.with_addr(link).cast::<BlockLink>().as_mut() }
-        }
-
-        /// Returns a mutable reference to the `DoubleBlockLink` at `link`.
-        ///
-        /// # Safety
-        ///
-        /// The caller must uphold the following invariants:
-        /// - `link` must be a properly aligned address for `DoubleBlockLink` values.
-        /// - The memory at `link` must contain a properly initialized `DoubleBlockLink` value.
-        /// - The memory at `link` must be within the provenance of `self` and
-        ///   unallocated by the associated allocator.
-        #[inline]
-        unsafe fn double_link_mut<'a>(self, link: NonZeroUsize) -> &'a mut DoubleBlockLink {
-            unsafe { self.ptr.with_addr(link).cast::<DoubleBlockLink>().as_mut() }
-        }
-
-        /// Creates a new pointer with the given address.
-        ///
-        /// The returned pointer has the provenance of this pointer.
-        #[inline]
-        fn with_addr(self, addr: NonZeroUsize) -> NonNull<u8> {
-            self.ptr.with_addr(addr)
-        }
-
-        #[inline]
-        fn with_addr_and_size(self, addr: NonZeroUsize, len: usize) -> NonNull<[u8]> {
-            let ptr = self.ptr.as_ptr().with_addr(addr.get());
-            let raw_slice = ptr::slice_from_raw_parts_mut(ptr, len);
-
-            unsafe { NonNull::new_unchecked(raw_slice) }
-        }
-
-        /// Creates a new pointer with the given offset.
-        ///
-        /// The returned pointer has the provenance of this pointer.
-        fn with_offset(self, offset: usize) -> Option<NonNull<u8>> {
-            let raw = self.ptr.addr().get().checked_add(offset)?;
-            let addr = NonZeroUsize::new(raw)?;
-            Some(self.ptr.with_addr(addr))
-        }
-    }
-
-    // Rather than using pointers, store only the addresses of the previous and
-    // next links.  This avoids accidentally violating stacked borrows; the
-    // links "point to" other blocks, but by forgoing actual pointers, no borrow
-    // is implied.
-    //
-    // NOTE: Using this method, any actual pointer to a block must be acquired
-    // via the allocator base pointer, and NOT by casting these addresses
-    // directly!
-
-    /// A link in a linked list of blocks of memory.
-    ///
-    /// This type is meant to be embedded in the block itself, forming an intrusive
-    /// linked list.
-    #[repr(C)]
-    struct BlockLink {
-        next: Option<NonZeroUsize>,
-    }
-
-    /// A double link in a linked list of blocks of memory.
-    ///
-    /// This type is meant to be embedded in the block itself, forming an intrusive
-    /// doubly linked list.
-    #[repr(C)]
-    struct DoubleBlockLink {
-        prev: Option<NonZeroUsize>,
-        next: Option<NonZeroUsize>,
     }
 
     /// Types which provide memory which backs an allocator.

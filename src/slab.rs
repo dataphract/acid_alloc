@@ -23,7 +23,7 @@
 use core::ptr;
 
 use crate::core::{
-    alloc::{AllocError, Layout, LayoutError},
+    alloc::{AllocError, Layout},
     fmt, mem,
     num::NonZeroUsize,
     ptr::NonNull,
@@ -41,7 +41,7 @@ use crate::core::alloc::Allocator;
 #[cfg(not(feature = "unstable"))]
 use crate::core::ptr::NonNullStrict;
 
-use crate::{layout_error, AllocInitError, BackingAllocator, BasePtr, BlockLink, Raw};
+use crate::{AllocInitError, BackingAllocator, BasePtr, BlockLink, Raw};
 
 /// A slab allocator.
 ///
@@ -294,7 +294,7 @@ where
     #[inline]
     pub fn region(&mut self) -> NonNull<[u8]> {
         NonNull::new(ptr::slice_from_raw_parts_mut(
-            self.base.ptr.as_ptr(),
+            self.base.ptr().as_ptr(),
             self.size(),
         ))
         .unwrap()
@@ -395,7 +395,6 @@ where
     #[inline]
     pub fn limit(&self) -> Option<NonZeroUsize> {
         self.base
-            .ptr
             .addr()
             .get()
             .checked_add(self.size())
@@ -409,8 +408,7 @@ where
     /// to an outstanding allocation.
     #[inline]
     pub fn contains_ptr(&self, ptr: NonNull<u8>) -> bool {
-        self.base.ptr.addr() <= ptr.addr()
-            && self.limit().map(|lim| ptr.addr() < lim).unwrap_or(true)
+        self.base.addr() <= ptr.addr() && self.limit().map(|lim| ptr.addr() < lim).unwrap_or(true)
     }
 
     /// Returns the number of outstanding allocations.
@@ -426,7 +424,7 @@ where
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Slab")
-            .field("base", &self.base.ptr)
+            .field("base", &self.base.ptr())
             .field("block_size", &self.block_size)
             .field("num_blocks", &self.num_blocks)
             .finish()
@@ -444,7 +442,7 @@ where
         if region_layout.size() != 0 {
             unsafe {
                 self.backing_allocator
-                    .deallocate(self.base.ptr, region_layout)
+                    .deallocate(self.base.ptr(), region_layout)
             }
         }
     }
@@ -491,7 +489,7 @@ impl RawSlab {
         // of a NonNull.
         let region_end = unsafe { NonZeroUsize::new_unchecked(region_end) };
 
-        let base = BasePtr { ptr: region };
+        let base = BasePtr::new(region, layout.size());
 
         // Initialize the free list by emplacing links in each block.
         for block_addr in (region.addr().get()..region_end.get()).step_by(block_size) {
@@ -522,7 +520,7 @@ impl RawSlab {
 
         Ok(RawSlab {
             base,
-            free_list: (num_blocks > 0).then(|| base.ptr.addr()),
+            free_list: (num_blocks > 0).then(|| base.addr()),
             block_size: block_size
                 .try_into()
                 .map_err(|_| AllocInitError::InvalidConfig)?,

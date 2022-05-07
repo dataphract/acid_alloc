@@ -1,7 +1,7 @@
 #![cfg(test)]
 extern crate std;
 
-use core::{mem, ops::Range};
+use core::{iter, marker::PhantomData, mem, ops::Range, ptr};
 
 use crate::{
     bump::Bump,
@@ -9,9 +9,6 @@ use crate::{
     slab::Slab,
     AllocError, AllocInitError, Buddy, Global,
 };
-
-#[cfg(not(feature = "unstable"))]
-use crate::core::alloc::LayoutExt;
 
 use alloc::{boxed::Box, vec::Vec};
 use quickcheck::{Arbitrary, Gen, QuickCheck};
@@ -25,6 +22,8 @@ trait QcAllocator: Sized {
 
     unsafe fn deallocate(&mut self, ptr: NonNull<u8>, _: Layout);
 }
+
+// Slab =======================================================================
 
 #[derive(Clone, Debug)]
 struct SlabParams {
@@ -57,6 +56,8 @@ impl QcAllocator for Slab<Global> {
     }
 }
 
+// Buddy ======================================================================
+
 #[derive(Clone, Debug)]
 struct BuddyParams<const BLK_SIZE: usize> {
     num_blocks: usize,
@@ -65,9 +66,10 @@ struct BuddyParams<const BLK_SIZE: usize> {
 
 impl<const BLK_SIZE: usize> Arbitrary for BuddyParams<BLK_SIZE> {
     fn arbitrary(g: &mut Gen) -> Self {
-        let num_blocks = cmp::max(usize::arbitrary(g) % g.size(), 1);
+        //let num_blocks = cmp::max(usize::arbitrary(g) % 8, 1);
+        let num_blocks = 2;
 
-        let gaps = if bool::arbitrary(g) {
+        let gaps = {
             let mut v = Vec::<usize>::arbitrary(g);
 
             v = v
@@ -79,11 +81,33 @@ impl<const BLK_SIZE: usize> Arbitrary for BuddyParams<BLK_SIZE> {
             v.sort();
 
             v.chunks_exact(2).map(|pair| pair[0]..pair[1]).collect()
-        } else {
-            Vec::new()
         };
 
         BuddyParams { num_blocks, gaps }
+    }
+
+    fn shrink(&self) -> Box<dyn Iterator<Item = Self>> {
+        let mut items = Vec::with_capacity(self.gaps.capacity() * 2);
+        for i in 0..self.gaps.len() {
+            items.push(BuddyParams {
+                num_blocks: self.num_blocks,
+                gaps: {
+                    let mut v = self.gaps.clone();
+                    v.remove(i);
+                    v
+                },
+            });
+            items.push(BuddyParams {
+                num_blocks: self.num_blocks - 1,
+                gaps: {
+                    let mut v = self.gaps.clone();
+                    v.remove(i);
+                    v
+                },
+            });
+        }
+
+        Box::new(items.into_iter())
     }
 }
 
@@ -91,7 +115,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> QcAllocator for Buddy<BLK_SIZE,
     type Params = BuddyParams<BLK_SIZE>;
 
     fn with_params(params: Self::Params) -> Result<Self, AllocInitError> {
-        Buddy::try_new(params.num_blocks)
+        Buddy::try_new_with_offset_gaps(params.num_blocks, params.gaps)
     }
 
     fn allocate(&mut self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
@@ -102,6 +126,8 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> QcAllocator for Buddy<BLK_SIZE,
         unsafe { self.deallocate(ptr) }
     }
 }
+
+// Bump ======================================================================
 
 #[derive(Clone, Debug)]
 struct BumpParams {
@@ -142,9 +168,9 @@ enum AllocatorOpTag {
 }
 
 #[derive(Clone, Debug)]
-enum AllocatorOp {
+enum AllocatorOp<P: Arbitrary> {
     /// Allocate a buffer that can hold `len` `u32` values.
-    Allocate { len: usize },
+    Allocate { params: P },
     /// Free an existing allocation.
     ///
     /// Given `n` outstanding allocations, the allocation to free is at index
@@ -155,18 +181,19 @@ enum AllocatorOp {
 /// Limit on allocation size, expressed in bits.
 const ALLOC_LIMIT_BITS: u8 = 16;
 
-impl Arbitrary for AllocatorOp {
+fn limited_size(g: &mut Gen) -> usize {
+    let exp = u8::arbitrary(g) % (ALLOC_LIMIT_BITS + 1);
+    usize::arbitrary(g) % 2_usize.pow(exp.into())
+}
+
+impl<P: Arbitrary> Arbitrary for AllocatorOp<P> {
     fn arbitrary(g: &mut Gen) -> Self {
         match g
             .choose(&[AllocatorOpTag::Allocate, AllocatorOpTag::Free])
             .unwrap()
         {
             AllocatorOpTag::Allocate => AllocatorOp::Allocate {
-                len: {
-                    // Try to distribute allocations evenly between powers of two.
-                    let exp = u8::arbitrary(g) % (ALLOC_LIMIT_BITS + 1);
-                    usize::arbitrary(g) % 2_usize.pow(exp.into())
-                },
+                params: P::arbitrary(g),
             },
             AllocatorOpTag::Free => AllocatorOp::Free {
                 index: usize::arbitrary(g),
@@ -175,95 +202,96 @@ impl Arbitrary for AllocatorOp {
     }
 }
 
-struct Allocation {
-    id: u32,
-    layout: Layout,
-    ptr: NonNull<[u8]>,
-    // Length with regard to the type passed to self.set_layout_of::<T>()
-    len: usize,
-}
+type OpId = u32;
 
-struct AllocatorChecker<A: QcAllocator> {
-    allocator: A,
-    allocations: Vec<Allocation>,
-    num_ops: u32,
-    // Layout of single items.
+struct RawAllocation {
+    id: OpId,
+    ptr: NonNull<[u8]>,
     layout: Layout,
-    pre_run_hook: Option<Box<dyn Fn() -> bool>>,
-    post_allocate_hook: Option<Box<dyn Fn(u32, usize, &mut AllocResult) -> bool>>,
-    pre_deallocate_hook: Option<Box<dyn Fn(&Allocation) -> bool>>,
-    post_run_hook: Option<Box<dyn Fn() -> bool>>,
 }
 
 type AllocResult = Result<NonNull<[u8]>, AllocError>;
 
-impl<A: QcAllocator> AllocatorChecker<A> {
-    fn new(params: A::Params, capacity: usize) -> Result<Self, AllocInitError> {
+trait PropAllocation {
+    type Params: Arbitrary;
+
+    fn layout(params: &Self::Params) -> Layout;
+    fn from_raw(params: &Self::Params, raw: RawAllocation) -> Self;
+    fn into_raw(self) -> RawAllocation;
+}
+
+trait Prop {
+    /// The allocator to test for this property.
+    type Allocator: QcAllocator;
+
+    type Allocation: PropAllocation;
+
+    /// Examines the result of an allocation.
+    fn post_allocate(
+        op_id: OpId,
+        params: &<Self::Allocation as PropAllocation>::Params,
+        res: &mut AllocResult,
+    ) -> bool {
+        let _ = (op_id, params, res);
+        true
+    }
+
+    fn pre_deallocate(allocation: &Self::Allocation) -> bool {
+        let _ = allocation;
+        true
+    }
+
+    fn check(
+        params: <Self::Allocator as QcAllocator>::Params,
+        ops: Vec<AllocatorOp<<Self::Allocation as PropAllocation>::Params>>,
+    ) -> bool;
+}
+
+struct AllocatorChecker<P: Prop> {
+    allocator: P::Allocator,
+    allocations: Vec<P::Allocation>,
+    num_ops: u32,
+}
+
+impl<P: Prop> AllocatorChecker<P> {
+    fn new(
+        params: <P::Allocator as QcAllocator>::Params,
+        capacity: usize,
+    ) -> Result<Self, AllocInitError> {
         Ok(AllocatorChecker {
-            allocator: A::with_params(params)?,
+            allocator: P::Allocator::with_params(params)?,
             allocations: Vec::with_capacity(capacity),
             num_ops: 0,
-            layout: Layout::new::<u8>(),
-            pre_run_hook: None,
-            post_allocate_hook: None,
-            pre_deallocate_hook: None,
-            post_run_hook: None,
         })
     }
 
-    fn set_layout_of<T>(&mut self) {
-        self.layout = Layout::new::<T>();
-    }
-
-    fn set_pre_run_hook(&mut self, hook: impl Fn() -> bool + 'static) {
-        self.pre_run_hook = Some(Box::new(hook));
-    }
-
-    fn set_post_allocate_hook(
-        &mut self,
-        hook: impl Fn(u32, usize, &mut AllocResult) -> bool + 'static,
-    ) {
-        self.post_allocate_hook = Some(Box::new(hook));
-    }
-
-    fn set_pre_deallocate_hook(&mut self, hook: impl Fn(&Allocation) -> bool + 'static) {
-        self.pre_deallocate_hook = Some(Box::new(hook));
-    }
-
-    fn set_post_run_hook(&mut self, hook: impl Fn() -> bool + 'static) {
-        self.post_run_hook = Some(Box::new(hook));
-    }
-
-    fn do_op(&mut self, op: AllocatorOp) -> bool {
+    fn do_op(&mut self, op: AllocatorOp<<P::Allocation as PropAllocation>::Params>) -> bool {
         let op_id = self.num_ops;
         self.num_ops += 1;
 
         match op {
-            AllocatorOp::Allocate { len } => {
-                let layout = self.layout.repeat(len).unwrap().0;
+            AllocatorOp::Allocate { params } => {
+                let layout = P::Allocation::layout(&params);
                 let mut res = self.allocator.allocate(layout);
 
-                if !self
-                    .post_allocate_hook
-                    .as_ref()
-                    .map(|f| f(op_id, len, &mut res))
-                    .unwrap_or(true)
-                {
+                if !P::post_allocate(op_id, &params, &mut res) {
                     return false;
                 }
 
                 match res {
                     Ok(ptr) => {
-                        self.allocations.push(Allocation {
-                            id: op_id,
-                            layout,
-                            ptr,
-                            len,
-                        });
+                        self.allocations.push(P::Allocation::from_raw(
+                            &params,
+                            RawAllocation {
+                                id: op_id,
+                                ptr,
+                                layout,
+                            },
+                        ));
                     }
 
                     // If the allocation should have succeeded, this is handled
-                    // by post_allocate_hook
+                    // by post_allocate
                     Err(AllocError) => (),
                 }
             }
@@ -276,14 +304,11 @@ impl<A: QcAllocator> AllocatorChecker<A> {
                 let index = index % self.allocations.len();
                 let a = self.allocations.swap_remove(index);
 
-                if !self
-                    .pre_deallocate_hook
-                    .as_ref()
-                    .map(|f| f(&a))
-                    .unwrap_or(true)
-                {
+                if !P::pre_deallocate(&a) {
                     return false;
                 }
+
+                let a = a.into_raw();
 
                 unsafe { self.allocator.deallocate(a.ptr.cast::<u8>(), a.layout) };
             }
@@ -292,25 +317,18 @@ impl<A: QcAllocator> AllocatorChecker<A> {
         true
     }
 
-    fn run(&mut self, ops: Vec<AllocatorOp>) -> bool {
-        if !self.pre_run_hook.as_mut().map(|f| f()).unwrap_or(true) {
-            return false;
-        }
-
+    fn run(&mut self, ops: Vec<AllocatorOp<<P::Allocation as PropAllocation>::Params>>) -> bool {
         if !ops.into_iter().all(|op| self.do_op(op)) {
             return false;
         }
 
         // Free any outstanding allocations.
         for alloc in self.allocations.drain(..) {
+            let alloc = alloc.into_raw();
             unsafe {
                 self.allocator
                     .deallocate(alloc.ptr.cast::<u8>(), alloc.layout)
             };
-        }
-
-        if !self.post_run_hook.as_mut().map(|f| f()).unwrap_or(true) {
-            return false;
         }
 
         true
@@ -326,47 +344,129 @@ const MAX_TESTS: u64 = 100;
 #[cfg(miri)]
 const MAX_TESTS: u64 = 20;
 
-fn allocations_are_mutually_exclusive<A>(params: A::Params, ops: Vec<AllocatorOp>) -> bool
-where
-    A: QcAllocator,
-{
-    let mut checker = AllocatorChecker::<A>::new(params, ops.capacity()).unwrap();
-    checker.set_layout_of::<u32>();
-    checker.set_post_allocate_hook(|id, len, res| {
+struct MutuallyExclusive<A: QcAllocator> {
+    phantom: PhantomData<A>,
+}
+
+struct MutuallyExclusiveAllocation {
+    op_id: OpId,
+    ptr: NonNull<[u32]>,
+    layout: Layout,
+}
+
+#[derive(Clone, Debug)]
+struct MutuallyExclusiveAllocationParams {
+    len: usize,
+}
+
+impl Arbitrary for MutuallyExclusiveAllocationParams {
+    fn arbitrary(g: &mut Gen) -> Self {
+        MutuallyExclusiveAllocationParams {
+            len: limited_size(g),
+        }
+    }
+}
+
+impl PropAllocation for MutuallyExclusiveAllocation {
+    type Params = MutuallyExclusiveAllocationParams;
+
+    fn layout(params: &Self::Params) -> Layout {
+        Layout::array::<u32>(params.len).unwrap()
+    }
+
+    fn from_raw(params: &Self::Params, raw: RawAllocation) -> Self {
+        MutuallyExclusiveAllocation {
+            op_id: raw.id,
+            ptr: NonNull::new(ptr::slice_from_raw_parts_mut(
+                raw.ptr.as_ptr().cast(),
+                params.len,
+            ))
+            .unwrap(),
+            layout: raw.layout,
+        }
+    }
+
+    fn into_raw(self) -> RawAllocation {
+        // TODO: use size_of_val_raw when stable
+        let num_bytes = mem::size_of::<u32>() * unsafe { self.ptr.as_ref().len() };
+
+        let bytes = NonNull::new(ptr::slice_from_raw_parts_mut(
+            self.ptr.cast().as_ptr(),
+            num_bytes,
+        ))
+        .unwrap();
+
+        RawAllocation {
+            id: self.op_id,
+            ptr: bytes,
+            layout: self.layout,
+        }
+    }
+}
+
+impl<A: QcAllocator> Prop for MutuallyExclusive<A> {
+    type Allocator = A;
+
+    type Allocation = MutuallyExclusiveAllocation;
+
+    fn check(
+        params: A::Params,
+        ops: Vec<AllocatorOp<<MutuallyExclusiveAllocation as PropAllocation>::Params>>,
+    ) -> bool {
+        let mut checker: AllocatorChecker<MutuallyExclusive<A>> =
+            AllocatorChecker::new(params, ops.capacity()).unwrap();
+        checker.run(ops)
+    }
+
+    fn post_allocate(
+        op_id: OpId,
+        params: &MutuallyExclusiveAllocationParams,
+        res: &mut AllocResult,
+    ) -> bool {
+        return true;
+
         if let Ok(alloc) = res {
             let u32_ptr: NonNull<u32> = alloc.cast();
-            let slice = unsafe { slice::from_raw_parts_mut(u32_ptr.as_ptr(), len) };
-            slice.fill(id);
+            let slice = unsafe { slice::from_raw_parts_mut(u32_ptr.as_ptr(), params.len) };
+            slice.fill(op_id);
         }
 
         true
-    });
-    checker.set_pre_deallocate_hook(|alloc| {
-        let u32_ptr: NonNull<u32> = alloc.ptr.cast();
-        let slice = unsafe { slice::from_raw_parts(u32_ptr.as_ptr(), alloc.len) };
-        slice.iter().copied().all(|elem| elem == alloc.id)
-    });
+    }
 
+    fn pre_deallocate(allocation: &Self::Allocation) -> bool {
+        return true;
+
+        let slice = unsafe { allocation.ptr.as_ref() };
+        slice.iter().copied().all(|elem| elem == allocation.op_id)
+    }
+}
+
+fn check<P: Prop>(
+    params: <P::Allocator as QcAllocator>::Params,
+    ops: Vec<AllocatorOp<<P::Allocation as PropAllocation>::Params>>,
+) -> bool {
+    let mut checker: AllocatorChecker<P> = AllocatorChecker::new(params, ops.capacity()).unwrap();
     checker.run(ops)
 }
 
 #[test]
 fn slab_allocations_are_mutually_exclusive() {
     let mut qc = QuickCheck::new().max_tests(MAX_TESTS);
-    qc.quickcheck(allocations_are_mutually_exclusive::<Slab<Global>> as fn(_, _) -> bool);
+    qc.quickcheck(check::<MutuallyExclusive<Slab<Global>>> as fn(_, _) -> bool);
 }
 
 #[test]
 fn buddy_allocations_are_mutually_exclusive() {
     let mut qc = QuickCheck::new().max_tests(MAX_TESTS);
-    qc.quickcheck(allocations_are_mutually_exclusive::<Buddy<16, 1, Global>> as fn(_, _) -> bool);
-    qc.quickcheck(allocations_are_mutually_exclusive::<Buddy<128, 2, Global>> as fn(_, _) -> bool);
-    qc.quickcheck(allocations_are_mutually_exclusive::<Buddy<1024, 4, Global>> as fn(_, _) -> bool);
-    qc.quickcheck(allocations_are_mutually_exclusive::<Buddy<4096, 8, Global>> as fn(_, _) -> bool);
+    //qc.quickcheck(check::<MutuallyExclusive<Buddy<16, 1, Global>>> as fn(_, _) -> bool);
+    //qc.quickcheck(check::<MutuallyExclusive<Buddy<128, 2, Global>>> as fn(_, _) -> bool);
+    qc.quickcheck(check::<MutuallyExclusive<Buddy<1024, 4, Global>>> as fn(_, _) -> bool);
+    //qc.quickcheck(check::<MutuallyExclusive<Buddy<4096, 8, Global>>> as fn(_, _) -> bool);
 }
 
 #[test]
 fn bump_allocations_are_mutually_exclusive() {
     let mut qc = QuickCheck::new().max_tests(MAX_TESTS);
-    qc.quickcheck(allocations_are_mutually_exclusive::<Bump<Global>> as fn(_, _) -> bool);
+    qc.quickcheck(check::<MutuallyExclusive<Bump<Global>>> as fn(_, _) -> bool);
 }

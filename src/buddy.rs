@@ -90,6 +90,18 @@ impl BuddyLevel {
         block_ofs ^ self.block_size
     }
 
+    fn enumerate_free_list(&self, base: BasePtr) -> usize {
+        let mut item = self.free_list;
+        let mut num = 0;
+
+        while let Some(it) = item {
+            num += 1;
+            item = unsafe { base.double_link_mut(it).next };
+        }
+
+        num
+    }
+
     /// Pushes a block onto the free list.
     unsafe fn free_list_push(&mut self, base: BasePtr, block: NonZeroUsize) {
         assert_eq!(block.get() & (mem::align_of::<DoubleBlockLink>() - 1), 0);
@@ -107,7 +119,7 @@ impl BuddyLevel {
 
         unsafe {
             base.init_double_link_at(
-                block,
+                new_head,
                 DoubleBlockLink {
                     next: old_head,
                     prev: None,
@@ -130,12 +142,20 @@ impl BuddyLevel {
     ///   valid for reads and writes for `size_of::<BlockLink>()` bytes.
     /// - `block` must be the address of an element of `self.free_list`.
     unsafe fn free_list_remove(&mut self, base: BasePtr, block: NonZeroUsize) {
+        #[cfg(test)]
+        {
+            std::eprintln!("remove {block:x?}");
+        }
+
         unsafe {
             let removed = base.double_link_mut(block);
+            debug_assert!(removed.next.map_or(true, |next| base.contains_addr(next)));
 
             match removed.prev {
                 // Link `prev` forward to `next`.
-                Some(p) => base.double_link_mut(p).next = removed.next,
+                Some(p) => {
+                    base.double_link_mut(p).next = removed.next;
+                }
 
                 // If there's no previous block, then `removed` is the head of
                 // the free list.
@@ -196,7 +216,7 @@ impl BuddyLevel {
         } else {
             let buddy_ofs = self.buddy_ofs(block_ofs);
             let buddy =
-                NonZeroUsize::new(base.ptr.addr().get().checked_add(buddy_ofs).unwrap()).unwrap();
+                NonZeroUsize::new(base.addr().get().checked_add(buddy_ofs).unwrap()).unwrap();
 
             // Remove the buddy block from the free list.
             unsafe { self.free_list_remove(base, buddy) };
@@ -364,6 +384,45 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> Buddy<BLK_SIZE, LEVELS, Raw> {
     }
 
     /// Constructs a new `Buddy` from raw pointers, with gaps specified by
+    /// offset ranges.
+    ///
+    /// # Safety
+    ///
+    /// The caller must uphold the following invariants:
+    /// - `region` must be a pointer to a region that satisfies the [`Layout`]
+    ///   returned by [`Self::region_layout(num_blocks)`], and it must be valid
+    ///   for reads and writes for the entire size indicated by that `Layout`.
+    /// - `metadata` must be a pointer to a region that satisfies the [`Layout`]
+    ///   returned by [`Self::metadata_layout(num_blocks)`], and it must be
+    ///   valid for reads and writes for the entire size indicated by that
+    ///   `Layout`.
+    ///
+    ///  # Errors
+    ///
+    ///  This constructor returns an error if the allocator configuration is
+    ///  invalid.
+    ///
+    /// [`Self::region_layout(num_blocks)`]: Self::region_layout
+    /// [`Self::metadata_layout(num_blocks)`]: Self::metadata_layout
+    /// [`Layout`]: core::alloc::Layout
+    pub unsafe fn new_raw_with_offset_gaps<I>(
+        metadata: NonNull<u8>,
+        region: NonNull<u8>,
+        num_blocks: usize,
+        gaps: I,
+    ) -> Result<Buddy<BLK_SIZE, LEVELS, Raw>, AllocInitError>
+    where
+        I: IntoIterator<Item = Range<usize>>,
+    {
+        unsafe {
+            RawBuddy::<BLK_SIZE, LEVELS>::try_new_with_offset_gaps(
+                metadata, region, num_blocks, gaps,
+            )
+            .map(|p| p.with_backing_allocator(Raw))
+        }
+    }
+
+    /// Constructs a new `Buddy` from raw pointers, with gaps specified by
     /// address ranges.
     ///
     /// # Safety
@@ -438,15 +497,6 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> Buddy<BLK_SIZE, LEVELS, Global>
                 NonNull::new(raw).ok_or(AllocInitError::AllocFailed(region_layout))?
             };
 
-            let gaps = gaps.into_iter().map(|ofs| {
-                let start =
-                    NonZeroUsize::new(region_ptr.addr().get().checked_add(ofs.start).unwrap())
-                        .unwrap();
-                let end = NonZeroUsize::new(region_ptr.addr().get().checked_add(ofs.end).unwrap())
-                    .unwrap();
-                start..end
-            });
-
             let metadata_ptr = {
                 let raw = alloc::alloc::alloc(metadata_layout);
                 NonNull::new(raw).ok_or_else(|| {
@@ -455,7 +505,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> Buddy<BLK_SIZE, LEVELS, Global>
                 })?
             };
 
-            match RawBuddy::<BLK_SIZE, LEVELS>::try_new_with_address_gaps(
+            match RawBuddy::<BLK_SIZE, LEVELS>::try_new_with_offset_gaps(
                 metadata_ptr,
                 region_ptr,
                 num_blocks.get(),
@@ -476,11 +526,23 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> Buddy<BLK_SIZE, LEVELS, Global>
 #[cfg(all(any(feature = "alloc", test), feature = "unstable"))]
 impl<const BLK_SIZE: usize, const LEVELS: usize> Buddy<BLK_SIZE, LEVELS, Global> {
     /// Attempts to construct a new `Buddy` backed by the global allocator.
+    ///
+    /// # Errors
+    ///
+    /// If allocation fails, or if the allocator configuration is invalid,
+    /// returns `Err`.
     #[cfg_attr(docs_rs, doc(cfg(feature = "alloc")))]
     pub fn try_new(num_blocks: usize) -> Result<Buddy<BLK_SIZE, LEVELS, Global>, AllocInitError> {
         Buddy::<BLK_SIZE, LEVELS, Global>::try_new_in(num_blocks, Global)
     }
 
+    /// Attempts to construct a new `Buddy` backed by the global allocator, with
+    /// gaps specified by offset ranges.
+    ///
+    /// # Errors
+    ///
+    /// If allocation fails, or if the allocator configuration is invalid,
+    /// returns `Err`.
     pub fn try_new_with_offset_gaps<I>(
         num_blocks: usize,
         gaps: I,
@@ -653,6 +715,11 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> Buddy<BLK_
         Ok(full_layout)
     }
 
+    #[inline]
+    fn enumerate_free_list(&self, level: usize) -> usize {
+        self.levels[level].enumerate_free_list(self.base)
+    }
+
     fn level_for(&self, size: usize) -> Option<usize> {
         fn round_up_pow2(x: usize) -> Option<usize> {
             match x {
@@ -805,7 +872,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> Buddy<BLK_
     ///   reference, is _always_ undefined behavior.
     pub fn region(&mut self) -> NonNull<[u8]> {
         NonNull::new(ptr::slice_from_raw_parts_mut(
-            self.base.ptr.as_ptr(),
+            self.base.ptr().as_ptr(),
             self.num_blocks.get() * BLK_SIZE,
         ))
         .unwrap()
@@ -825,7 +892,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> Buddy<BLK_
     pub unsafe fn into_raw_parts(self) -> (NonNull<u8>, NonNull<u8>) {
         let Buddy { base, metadata, .. } = self;
 
-        (base.ptr, metadata)
+        (base.ptr(), metadata)
     }
 }
 
@@ -835,7 +902,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> fmt::Debug
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Buddy")
             .field("metadata", &self.metadata)
-            .field("base", &self.base.ptr)
+            .field("base", &self.base.ptr())
             .field("num_blocks", &self.num_blocks)
             .finish()
     }
@@ -845,7 +912,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> Drop
     for Buddy<BLK_SIZE, LEVELS, A>
 {
     fn drop(&mut self) {
-        let region = self.base.ptr;
+        let region = self.base.ptr();
         let metadata = self.metadata;
         let num_blocks = self.num_blocks;
 
@@ -890,27 +957,6 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> RawBuddy<BLK_SIZE, LEVELS> {
             levels,
             backing_allocator,
         }
-    }
-
-    /// Construct a new `BuddyParts` from raw pointers.
-    ///
-    /// # Safety
-    ///
-    /// The caller must uphold the following invariants:
-    /// - `base` must be a pointer to a region that satisfies the [`Layout`]
-    ///   returned by [`Self::region_layout()`], and it must be valid for reads
-    ///   and writes for the entire size indicated by that `Layout`.
-    /// - `metadata` must be a pointer to a region that satisfies the [`Layout`]
-    ///   returned by [`Self::metadata_layout()`], and it must be valid for
-    ///   reads and writes for the entire size indicated by that `Layout`.
-    ///
-    /// [`Layout`]: core::alloc::Layout
-    pub unsafe fn try_new(
-        metadata: NonNull<u8>,
-        base: NonNull<u8>,
-        num_blocks: usize,
-    ) -> Result<RawBuddy<BLK_SIZE, LEVELS>, AllocInitError> {
-        unsafe { Self::try_new_with_address_gaps(metadata, base, num_blocks, iter::empty()) }
     }
 
     pub unsafe fn try_new_with_offset_gaps<I>(
@@ -1047,19 +1093,14 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> RawBuddy<BLK_SIZE, LEVELS> {
             (&levels as *const _ as *const [BuddyLevel; LEVELS]).read()
         };
 
-        let base = BasePtr { ptr: base };
+        let base = BasePtr::new(base, region_layout.size());
 
         // Widen the gaps so their boundaries lie on block boundaries.
         let mut gaps = AlignedRanges::new(gaps.into_iter(), min_block_size);
         let mut gap: Option<Range<NonZeroUsize>> = gaps.next();
 
-        let mut curs = base.ptr.addr().get();
-        let limit = base
-            .ptr
-            .addr()
-            .get()
-            .checked_add(region_layout.size())
-            .unwrap();
+        let mut curs = base.addr().get();
+        let limit = base.addr().get().checked_add(region_layout.size()).unwrap();
 
         let min_pow = min_block_size.trailing_zeros();
         let max_pow = BLK_SIZE.trailing_zeros();
@@ -1067,7 +1108,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> RawBuddy<BLK_SIZE, LEVELS> {
         while curs < limit {
             let curs_pow = curs.trailing_zeros().max(min_pow).min(max_pow);
             let curs_align = 1 << curs_pow;
-            let curs_ofs = curs - base.ptr.addr().get();
+            let curs_ofs = curs - base.addr().get();
 
             let (in_gap, block_end) = match gap {
                 None => (false, limit),
@@ -1411,10 +1452,30 @@ mod tests {
         type Alloc = Buddy<16, 1, Global>;
         let layout = Layout::from_size_align(1, 1).unwrap();
 
-        for gaps in std::vec![[0..1], [15..16]] {
+        for gaps in std::vec![[0..1], [15..16], [0..16], [15..32]] {
             let mut allocator = Alloc::try_new_with_offset_gaps(1, gaps).unwrap();
             allocator.allocate(layout).unwrap_err();
         }
+
+        for gaps in std::vec![[0..32], [0..17], [15..32], [15..17]] {
+            let mut allocator = Alloc::try_new_with_offset_gaps(2, gaps).unwrap();
+            allocator.allocate(layout).unwrap_err();
+        }
+
+        for gaps in std::vec![[0..48], [0..33], [15..48], [15..33]] {
+            let mut allocator = Alloc::try_new_with_offset_gaps(3, gaps).unwrap();
+            allocator.allocate(layout).unwrap_err();
+        }
+
+        for gaps in std::vec![[0..32], [0..17], [15..32], [15..17], [16..48], [16..33]] {
+            let mut allocator = Alloc::try_new_with_offset_gaps(3, gaps).unwrap();
+            let a = allocator.allocate(layout).unwrap();
+            unsafe { allocator.deallocate(a.cast()) };
+        }
+
+        let mut allocator = Alloc::try_new_with_offset_gaps(1, [16..32]).unwrap();
+        let a = allocator.allocate(layout).unwrap();
+        unsafe { allocator.deallocate(a.cast()) };
     }
 
     #[test]
@@ -1424,12 +1485,12 @@ mod tests {
         let half = Layout::from_size_align(16, 16).unwrap();
         let full = Layout::from_size_align(32, 32).unwrap();
 
-        for gaps in std::vec![[0..32], [0..17], [15..32], [8..24]] {
+        for gaps in std::vec![[0..32], [0..17], [15..32], [8..24], [0..48], [15..48]] {
             let mut allocator = Alloc::try_new_with_offset_gaps(1, gaps).unwrap();
             allocator.allocate(one_byte).unwrap_err();
         }
 
-        for gaps in std::vec![[0..16], [16..32]] {
+        for gaps in std::vec![[0..16], [16..32], [16..48]] {
             let mut allocator = Alloc::try_new_with_offset_gaps(1, gaps).unwrap();
 
             // Can't allocate the entire region.
@@ -1444,5 +1505,54 @@ mod tests {
             // Ensure freeing doesn't cause coalescing into the gap.
             allocator.allocate(full).unwrap_err();
         }
+    }
+
+    #[test]
+    fn three_level_gaps() {
+        type Alloc = Buddy<128, 4, Global>;
+        let layout = Layout::from_size_align(16, 4).unwrap();
+
+        // X = gap, s = split, f = free
+        // [       s       |       F       ]
+        // [   s   |   s   |       |       ]
+        // [ X | X | s | F |   |   |   |   ]
+        // [ | | | |X|F| | | | | | | | | | ]
+        let mut allocator = Alloc::try_new_with_offset_gaps(2, [0..72]).unwrap();
+
+        // [       s       |       F       ] 128
+        // [   s   |   s   |       |       ]  64
+        // [ X | X | s | F |   |   |   |   ]  32
+        // [ | | | |X|a| | | | | | | | | | ]  16
+        let a = allocator.allocate(layout).unwrap();
+        assert_eq!(allocator.enumerate_free_list(0), 1);
+        assert_eq!(allocator.enumerate_free_list(1), 0);
+        assert_eq!(allocator.enumerate_free_list(2), 1);
+        assert_eq!(allocator.enumerate_free_list(3), 0);
+
+        // [       s       |       F       ] 128
+        // [   s   |   s   |       |       ]  64
+        // [ X | X | s | s |   |   |   |   ]  32
+        // [ | | | |X|a|b|F| | | | | | | | ]  16
+        let b = allocator.allocate(layout).unwrap();
+        assert_eq!(allocator.enumerate_free_list(0), 1);
+        assert_eq!(allocator.enumerate_free_list(1), 0);
+        assert_eq!(allocator.enumerate_free_list(2), 0);
+        assert_eq!(allocator.enumerate_free_list(3), 1);
+
+        // [       s       |       F       ] 128
+        // [   s   |   s   |       |       ]  64
+        // [ X | X | s | s |   |   |   |   ]  32
+        // [ | | | |X|F|b|F| | | | | | | | ]  16
+        unsafe { allocator.deallocate(a.cast()) };
+        assert_eq!(allocator.enumerate_free_list(0), 1);
+        assert_eq!(allocator.enumerate_free_list(1), 0);
+        assert_eq!(allocator.enumerate_free_list(2), 0);
+        assert_eq!(allocator.enumerate_free_list(3), 2);
+
+        // [       s       |       F       ] 128
+        // [   s   |   s   |       |       ]  64
+        // [ X | X | s | F |   |   |   |   ]  32
+        // [ | | | |X|F| | | | | | | | | | ]  16
+        unsafe { allocator.deallocate(b.cast()) };
     }
 }
