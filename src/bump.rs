@@ -185,6 +185,10 @@ where
     /// Returns `Err` if there is insufficient memory remaining to accommodate
     /// `layout`.
     pub fn allocate(&mut self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        if layout.size() == 0 {
+            return Err(AllocError);
+        }
+
         let new_low_unaligned = self
             .low_mark
             .get()
