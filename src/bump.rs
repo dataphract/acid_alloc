@@ -68,11 +68,11 @@ impl Bump<Raw> {
     /// memory; all prior allocations from `self` are backed by the second
     /// element.
     pub fn split(self) -> (Bump<Raw>, Bump<Raw>) {
-        let base_addr = self.base.ptr.addr();
+        let base_addr = self.base.addr();
         let lower_size = self.low_mark.get().checked_sub(base_addr.get()).unwrap();
         let lower_limit = self.low_mark;
         let lower = Bump {
-            base: self.base,
+            base: BasePtr::new(self.base.ptr(), lower_size),
             limit: lower_limit,
             outstanding: 0,
             low_mark: lower_limit,
@@ -80,10 +80,8 @@ impl Bump<Raw> {
             backing_allocator: Raw,
         };
 
-        let new_base = BasePtr {
-            ptr: self.base.with_addr(self.low_mark),
-        };
         let upper_size = self.layout.size().checked_sub(lower_size).unwrap();
+        let new_base = BasePtr::new(self.base.with_addr(self.low_mark), upper_size);
         let upper = Bump {
             base: new_base,
             limit: self.limit,
@@ -195,7 +193,7 @@ where
 
         let new_low_mark = new_low_unaligned & !(layout.align() - 1);
 
-        if new_low_mark < self.base.ptr.addr().get() {
+        if new_low_mark < self.base.addr().get() {
             return Err(AllocError);
         }
 
@@ -251,7 +249,7 @@ where
     /// it to a reference if there are any outstanding allocations.
     pub fn region(&mut self) -> NonNull<[u8]> {
         NonNull::new(ptr::slice_from_raw_parts_mut(
-            self.base.ptr.as_ptr(),
+            self.base.ptr().as_ptr(),
             self.layout.size(),
         ))
         .unwrap()
@@ -265,7 +263,7 @@ where
     fn drop(&mut self) {
         unsafe {
             self.backing_allocator
-                .deallocate(self.base.ptr, self.layout)
+                .deallocate(self.base.ptr(), self.layout)
         };
     }
 }
@@ -308,7 +306,7 @@ impl RawBump {
             return Err(AllocInitError::InvalidConfig);
         }
 
-        let base = BasePtr { ptr: region };
+        let base = BasePtr::new(region, layout.size());
         let limit = NonZeroUsize::new(
             region
                 .addr()
