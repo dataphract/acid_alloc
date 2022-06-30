@@ -423,8 +423,6 @@ impl<A: QcAllocator> Prop for MutuallyExclusive<A> {
         params: &MutuallyExclusiveAllocationParams,
         res: &mut AllocResult,
     ) -> bool {
-        return true;
-
         if let Ok(alloc) = res {
             let u32_ptr: NonNull<u32> = alloc.cast();
             let slice = unsafe { slice::from_raw_parts_mut(u32_ptr.as_ptr(), params.len) };
@@ -435,8 +433,6 @@ impl<A: QcAllocator> Prop for MutuallyExclusive<A> {
     }
 
     fn pre_deallocate(allocation: &Self::Allocation) -> bool {
-        return true;
-
         let slice = unsafe { allocation.ptr.as_ref() };
         slice.iter().copied().all(|elem| elem == allocation.op_id)
     }
@@ -459,10 +455,10 @@ fn slab_allocations_are_mutually_exclusive() {
 #[test]
 fn buddy_allocations_are_mutually_exclusive() {
     let mut qc = QuickCheck::new().max_tests(MAX_TESTS);
-    //qc.quickcheck(check::<MutuallyExclusive<Buddy<16, 1, Global>>> as fn(_, _) -> bool);
-    //qc.quickcheck(check::<MutuallyExclusive<Buddy<128, 2, Global>>> as fn(_, _) -> bool);
+    qc.quickcheck(check::<MutuallyExclusive<Buddy<16, 1, Global>>> as fn(_, _) -> bool);
+    qc.quickcheck(check::<MutuallyExclusive<Buddy<128, 2, Global>>> as fn(_, _) -> bool);
     qc.quickcheck(check::<MutuallyExclusive<Buddy<1024, 4, Global>>> as fn(_, _) -> bool);
-    //qc.quickcheck(check::<MutuallyExclusive<Buddy<4096, 8, Global>>> as fn(_, _) -> bool);
+    qc.quickcheck(check::<MutuallyExclusive<Buddy<4096, 8, Global>>> as fn(_, _) -> bool);
 }
 
 #[test]

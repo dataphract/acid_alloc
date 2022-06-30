@@ -114,6 +114,33 @@ impl Bitmap {
             block_ptr.write(block ^ mask);
         }
     }
+
+    pub fn iter(&self) -> BitmapIter {
+        BitmapIter {
+            idx: 0,
+            bitmap: self,
+        }
+    }
+}
+
+pub struct BitmapIter<'a> {
+    idx: usize,
+    bitmap: &'a Bitmap,
+}
+
+impl<'a> Iterator for BitmapIter<'a> {
+    type Item = bool;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.idx >= self.bitmap.num_bits {
+            return None;
+        }
+
+        let bit = self.bitmap.get(self.idx);
+        self.idx += 1;
+
+        Some(bit)
+    }
 }
 
 #[cfg(test)]

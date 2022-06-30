@@ -90,13 +90,21 @@ impl BuddyLevel {
         block_ofs ^ self.block_size
     }
 
+    #[cfg(test)]
     fn enumerate_free_list(&self, base: BasePtr) -> usize {
         let mut item = self.free_list;
         let mut num = 0;
+        let mut prev = None;
 
         while let Some(it) = item {
             num += 1;
-            item = unsafe { base.double_link_mut(it).next };
+
+            let link = unsafe { base.double_link_mut(it) };
+
+            assert_eq!(link.prev, prev);
+
+            prev = item;
+            item = link.next;
         }
 
         num
@@ -142,11 +150,6 @@ impl BuddyLevel {
     ///   valid for reads and writes for `size_of::<BlockLink>()` bytes.
     /// - `block` must be the address of an element of `self.free_list`.
     unsafe fn free_list_remove(&mut self, base: BasePtr, block: NonZeroUsize) {
-        #[cfg(test)]
-        {
-            std::eprintln!("remove {block:x?}");
-        }
-
         unsafe {
             let removed = base.double_link_mut(block);
             debug_assert!(removed.next.map_or(true, |next| base.contains_addr(next)));
@@ -715,6 +718,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> Buddy<BLK_
         Ok(full_layout)
     }
 
+    #[cfg(test)]
     #[inline]
     fn enumerate_free_list(&self, level: usize) -> usize {
         self.levels[level].enumerate_free_list(self.base)
@@ -1142,16 +1146,15 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> RawBuddy<BLK_SIZE, LEVELS> {
                 }
             }
 
-            if in_gap {
-                // If the block is in a gap, toggle its buddy bit to prevent it
-                // from being coalesced when its buddy is deallocated.
-                let buddy_bit = levels[target_level].buddy_bit(curs_ofs);
-                levels[target_level].buddies.toggle(buddy_bit);
-            } else {
+            if !in_gap {
                 // If not in a gap, this block should be added to its level's free list.
+                // Toggle the buddy bit for each block added.
                 unsafe {
                     levels[target_level].free_list_push(base, NonZeroUsize::new(curs).unwrap());
                 }
+
+                let buddy_bit = levels[target_level].buddy_bit(curs_ofs);
+                levels[target_level].buddies.toggle(buddy_bit);
             }
 
             curs += block_size;
@@ -1518,12 +1521,14 @@ mod tests {
         // [ X | X | s | F |   |   |   |   ]
         // [ | | | |X|F| | | | | | | | | | ]
         let mut allocator = Alloc::try_new_with_offset_gaps(2, [0..72]).unwrap();
+        std::println!("base = {:08x}", allocator.base.addr().get());
 
         // [       s       |       F       ] 128
         // [   s   |   s   |       |       ]  64
         // [ X | X | s | F |   |   |   |   ]  32
         // [ | | | |X|a| | | | | | | | | | ]  16
         let a = allocator.allocate(layout).unwrap();
+        std::println!("a = {:08x}", a.as_ptr() as *mut () as usize);
         assert_eq!(allocator.enumerate_free_list(0), 1);
         assert_eq!(allocator.enumerate_free_list(1), 0);
         assert_eq!(allocator.enumerate_free_list(2), 1);
@@ -1534,6 +1539,7 @@ mod tests {
         // [ X | X | s | s |   |   |   |   ]  32
         // [ | | | |X|a|b|F| | | | | | | | ]  16
         let b = allocator.allocate(layout).unwrap();
+        std::println!("b = {:08x}", b.as_ptr() as *mut () as usize);
         assert_eq!(allocator.enumerate_free_list(0), 1);
         assert_eq!(allocator.enumerate_free_list(1), 0);
         assert_eq!(allocator.enumerate_free_list(2), 0);
@@ -1548,6 +1554,15 @@ mod tests {
         assert_eq!(allocator.enumerate_free_list(1), 0);
         assert_eq!(allocator.enumerate_free_list(2), 0);
         assert_eq!(allocator.enumerate_free_list(3), 2);
+        for lev in allocator.levels.iter() {
+            for bit in lev.buddies.iter() {
+                let s = if bit { "1" } else { "0" };
+
+                std::print!("{s}");
+            }
+
+            std::println!();
+        }
 
         // [       s       |       F       ] 128
         // [   s   |   s   |       |       ]  64

@@ -217,6 +217,7 @@ pub struct BlockLink {
 /// This type is meant to be embedded in the block itself, forming an intrusive
 /// doubly linked list.
 #[repr(C)]
+#[derive(Debug)]
 pub struct DoubleBlockLink {
     pub prev: Option<NonZeroUsize>,
     pub next: Option<NonZeroUsize>,
