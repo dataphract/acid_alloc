@@ -1,6 +1,9 @@
 //! Bump allocation.
 //!
-//! A bump allocator is a simple and fast allocator
+//! A bump allocator is a simple and fast allocator well-suited to allocating
+//! large numbers of objects that will be deallocated en masse. However, a bump
+//! allocator cannot free individual objects; all outstanding allocations must
+//! be freed in order to reclaim memory.
 //!
 //! ## Characteristics
 //!
