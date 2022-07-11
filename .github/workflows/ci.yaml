@@ -59,8 +59,8 @@ jobs:
           override: true
       - uses: actions-rs/cargo@v1
         with:
-          command: test --workspace
-          args: --no-default-features --features=${{ matrix.features }}
+          command: test
+          args: --workspace --no-default-features --features=${{ matrix.features }}
 
   test_nightly:
     name: test (stable)
@@ -81,5 +81,5 @@ jobs:
           override: true
       - uses: actions-rs/cargo@v1
         with:
-          command: test --workspace
-          args: --no-default-features --features=${{ matrix.features }}
+          command: test
+          args: --workspace --no-default-features --features=${{ matrix.features }}
