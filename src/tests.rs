@@ -1,7 +1,7 @@
 #![cfg(test)]
 extern crate std;
 
-use core::{iter, marker::PhantomData, mem, ops::Range, ptr};
+use core::{marker::PhantomData, mem, ops::Range, ptr};
 
 use crate::{
     bump::Bump,
