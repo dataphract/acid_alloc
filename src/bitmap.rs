@@ -165,8 +165,7 @@ mod tests {
         fn new(num_bits: usize) -> VecBitmap {
             let num_blocks = Bitmap::num_blocks(num_bits);
 
-            let mut v = Vec::with_capacity(num_blocks);
-            v.resize(num_blocks, 0);
+            let v = std::vec![0; num_blocks];
 
             // TODO: use Vec::into_raw_parts when stable
             let mut v = ManuallyDrop::new(v);
