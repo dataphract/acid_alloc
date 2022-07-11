@@ -63,7 +63,7 @@ jobs:
           args: --workspace --no-default-features --features=${{ matrix.features }}
 
   test_nightly:
-    name: test (stable)
+    name: test (nightly)
     runs-on: ubuntu-latest
     strategy:
       matrix:
