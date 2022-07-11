@@ -1138,10 +1138,10 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> RawBuddy<BLK_SIZE, LEVELS> {
             // large to fit before the gap boundary.
             let init_level = (max_pow - curs_pow) as usize;
             let target_level = (max_pow - block_size.trailing_zeros()) as usize;
-            for lv in init_level..target_level {
+            for lv in levels.iter_mut().take(target_level).skip(init_level) {
                 // Mark the block as split.
-                let split_bit = levels[lv].index_of(curs_ofs);
-                if let Some(s) = levels[lv].splits.as_mut() {
+                let split_bit = lv.index_of(curs_ofs);
+                if let Some(s) = lv.splits.as_mut() {
                     s.set(split_bit, true);
                 }
             }

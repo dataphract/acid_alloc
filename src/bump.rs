@@ -223,7 +223,8 @@ where
     ///
     /// [*currently allocated*]: https://doc.rust-lang.org/nightly/alloc/alloc/trait.Allocator.html#currently-allocated-memory
     pub unsafe fn deallocate(&mut self, ptr: NonNull<u8>) {
-        drop(ptr);
+        let _ = ptr;
+
         self.outstanding = self.outstanding.checked_sub(1).unwrap();
 
         if self.outstanding == 0 {

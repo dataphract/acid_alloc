@@ -115,6 +115,7 @@ impl Bitmap {
         }
     }
 
+    #[cfg(test)]
     pub fn iter(&self) -> BitmapIter {
         BitmapIter {
             idx: 0,
@@ -123,11 +124,13 @@ impl Bitmap {
     }
 }
 
+#[cfg(test)]
 pub struct BitmapIter<'a> {
     idx: usize,
     bitmap: &'a Bitmap,
 }
 
+#[cfg(test)]
 impl<'a> Iterator for BitmapIter<'a> {
     type Item = bool;
 

@@ -208,7 +208,7 @@ where
                         backing_allocator.deallocate(region_ptr, region_layout);
                     }
 
-                    return Err(e);
+                    Err(e)
                 }
             }
         }
@@ -229,12 +229,12 @@ where
     pub fn region_layout(block_size: usize, num_blocks: usize) -> Result<Layout, AllocInitError> {
         let total_size = block_size
             .checked_mul(num_blocks)
-            .ok_or_else(|| AllocInitError::InvalidConfig)?;
+            .ok_or(AllocInitError::InvalidConfig)?;
         u32::try_from(total_size).map_err(|_| AllocInitError::InvalidConfig)?;
 
         let align = 1_usize
             .checked_shl(block_size.trailing_zeros())
-            .ok_or_else(|| AllocInitError::InvalidConfig)?;
+            .ok_or(AllocInitError::InvalidConfig)?;
         u32::try_from(align).map_err(|_| AllocInitError::InvalidConfig)?;
 
         Layout::from_size_align(total_size, align).map_err(|_| AllocInitError::InvalidConfig)
@@ -398,8 +398,7 @@ where
             .addr()
             .get()
             .checked_add(self.size())
-            .map(NonZeroUsize::new)
-            .flatten()
+            .and_then(NonZeroUsize::new)
     }
 
     /// Returns `true` _iff_ `ptr` is within this allocator's managed region.

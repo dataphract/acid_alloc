@@ -114,14 +114,16 @@ requires_sptr_or_unstable! {
     use crate::{
         base::{BasePtr, BlockLink, DoubleBlockLink},
         core::{
-            alloc::{Layout, LayoutError},
+            alloc::{Layout},
             ptr::NonNull,
         },
     };
 
+    #[cfg(not(feature = "unstable"))]
+    use crate::core::alloc::LayoutError;
+
     #[cfg(feature = "unstable")]
     use crate::core::alloc::Allocator;
-
 
     #[doc(inline)]
     pub use crate::{buddy::Buddy, bump::Bump, core::alloc::AllocError, slab::Slab};

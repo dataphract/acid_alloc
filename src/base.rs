@@ -33,12 +33,6 @@ impl BasePtr {
         self.ptr
     }
 
-    /// Returns the extent in bytes of the region.
-    #[inline]
-    pub fn extent(self) -> usize {
-        self.extent
-    }
-
     #[inline]
     pub fn limit(self) -> NonZeroUsize {
         NonZeroUsize::new(self.ptr.addr().get() + self.extent).unwrap()
