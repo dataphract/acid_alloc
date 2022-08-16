@@ -50,7 +50,15 @@ impl arbitrary::Arbitrary<'_> for AllocatorOp {
 pub trait Subject {
     type AllocError;
 
+    /// Allocates a block of memory according to `layout`.
     fn allocate(&mut self, layout: Layout) -> Result<NonNull<[u8]>, Self::AllocError>;
+
+    /// Deallocates the block of memory with layout `layout` pointed to by `ptr`.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must denote a block of memory currently allocated by this
+    /// allocator, and it must have been allocated with `layout`.
     unsafe fn deallocate(&mut self, ptr: NonNull<u8>, layout: Layout);
 }
 
