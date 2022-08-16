@@ -44,7 +44,7 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: clippy
-          args: --workspace --all-targets --no-default-features --features=${{ matrix.features }},alloc -- -D warnings
+          args: --workspace --all-targets --no-default-features --features=sptr,alloc -- -D warnings
 
   test_stable:
     name: test (stable)
@@ -87,8 +87,3 @@ jobs:
         with:
           command: test
           args: --no-default-features --features=${{ matrix.features }}
-      # alloc enabled
-      - uses: actions-rs/cargo@v1
-        with:
-          command: test
-          args: --workspace --no-default-features --features=${{ matrix.features }},alloc
