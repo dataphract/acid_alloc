@@ -240,7 +240,7 @@ where
         Layout::from_size_align(total_size, align).map_err(|_| AllocInitError::InvalidConfig)
     }
 
-    /// Attempts to allocate a block of memory from the slab.
+    /// Attempts to allocate a block of memory with the specified layout.
     ///
     /// The returned block is guaranteed to be aligned to `1 <<
     /// block_size.trailing_zeros()` bytes.
@@ -266,6 +266,28 @@ where
         self.outstanding += 1;
 
         Ok(self.base.with_addr_and_size(old_head, layout.size()))
+    }
+
+    /// Attempts to allocate a block of memory from the slab.
+    ///
+    /// The layout of the returned block is determined by the allocator
+    /// configuration. The returned block is guaranteed to be aligned to `1 <<
+    /// block_size.trailing_zeros()` bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if no blocks are available.
+    pub fn allocate_block(&mut self) -> Result<NonNull<[u8]>, AllocError> {
+        let old_head = self.free_list.take().ok_or(AllocError)?;
+
+        unsafe {
+            let link_mut = self.base.link_mut(old_head);
+            self.free_list = link_mut.next.take();
+        }
+
+        self.outstanding += 1;
+
+        Ok(self.base.with_addr_and_size(old_head, self.block_size()))
     }
 
     /// Deallocates the memory referenced by `ptr`.
@@ -408,6 +430,12 @@ where
     #[inline]
     pub fn contains_ptr(&self, ptr: NonNull<u8>) -> bool {
         self.base.addr() <= ptr.addr() && self.limit().map(|lim| ptr.addr() < lim).unwrap_or(true)
+    }
+
+    /// Returns `true` _iff_ this allocator has allocated all its memory.
+    #[inline]
+    pub fn is_full(&self) -> bool {
+        self.free_list.is_none()
     }
 
     /// Returns the number of outstanding allocations.

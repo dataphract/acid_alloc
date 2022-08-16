@@ -13,6 +13,12 @@ keywords = ["allocator", "no_std"]
 all-features = true
 rustdoc-args = ["--cfg", "docs_rs"]
 
+[workspace]
+members = [
+    "acid_alloc_hater",
+    "alloc_hater",
+]
+
 [features]
 default = ["sptr"]
 

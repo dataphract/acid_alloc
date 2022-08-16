@@ -103,12 +103,12 @@ pub mod num {
     // #![feature(int_log)]
 
     pub trait UsizeExt {
-        fn log2(self) -> u32;
+        fn ilog2(self) -> u32;
     }
 
     impl UsizeExt for usize {
         #[inline]
-        fn log2(self) -> u32 {
+        fn ilog2(self) -> u32 {
             Self::BITS - 1 - self.leading_zeros()
         }
     }
