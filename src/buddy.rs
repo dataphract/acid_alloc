@@ -730,7 +730,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> Buddy<BLK_
                 0 => None,
                 1 => Some(1),
                 x if x >= (1 << 63) => None,
-                _ => Some(2usize.pow((x - 1).log2() as u32 + 1)),
+                _ => Some(2usize.pow((x - 1).ilog2() as u32 + 1)),
             }
         }
 
@@ -741,7 +741,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> Buddy<BLK_
         }
 
         let alloc_size = cmp::max(round_up_pow2(size).unwrap(), min_block_size);
-        let level: usize = (max_block_size.log2() - alloc_size.log2())
+        let level: usize = (max_block_size.ilog2() - alloc_size.ilog2())
             .try_into()
             .unwrap();
 
@@ -763,7 +763,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> Buddy<BLK_
 
         assert!(max_size >= min_block_size);
 
-        (max_block_size.log2() - max_size.log2())
+        (max_block_size.ilog2() - max_size.ilog2())
             .try_into()
             .unwrap()
     }
