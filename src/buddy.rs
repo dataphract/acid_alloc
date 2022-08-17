@@ -620,7 +620,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: Allocator> Buddy<BLK_SIZE, L
 }
 
 impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> Buddy<BLK_SIZE, LEVELS, A> {
-    fn min_block_size() -> Result<usize, AllocInitError> {
+    const fn min_block_size() -> Result<usize, AllocInitError> {
         if LEVELS == 0 || !BLK_SIZE.is_power_of_two() || LEVELS >= usize::BITS as usize {
             return Err(AllocInitError::InvalidConfig);
         }
@@ -995,50 +995,69 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> RawBuddy<BLK_SIZE, LEVELS> {
     {
         let mut buddy = unsafe { Self::try_new_unpopulated(metadata, base, num_blocks) }?;
 
-        let num_blocks = NonZeroUsize::new(num_blocks).ok_or(AllocInitError::InvalidConfig)?;
-        let min_block_size = Buddy::<BLK_SIZE, LEVELS, Raw>::min_block_size()?;
-        let region_layout = Buddy::<BLK_SIZE, LEVELS, Raw>::region_layout_impl(num_blocks)?;
+        let min_block_size = Buddy::<BLK_SIZE, LEVELS, Raw>::min_block_size().unwrap();
+        let gaps = AlignedRanges::new(gaps.into_iter(), min_block_size);
 
-        // Widen the gaps so their boundaries lie on block boundaries.
-        let mut gaps = AlignedRanges::new(gaps.into_iter(), min_block_size);
-        let mut gap: Option<Range<NonZeroUsize>> = gaps.next();
+        let mut start = buddy.base.addr();
+        for gap in gaps {
+            let end = gap.start;
+            unsafe { buddy.populate_region(start..end) };
+            start = gap.end;
+        }
+        let end = buddy.base.limit();
 
-        let mut curs = base.addr().get();
-        let limit = base.addr().get().checked_add(region_layout.size()).unwrap();
+        unsafe { buddy.populate_region(start..end) };
+
+        Ok(buddy)
+    }
+
+    /// Populates a region not already managed by this allocator.
+    ///
+    /// # Safety
+    ///
+    /// `range` must be a range of addresses not already managed by this
+    /// allocator.
+    unsafe fn populate_region(&mut self, addr_range: Range<NonZeroUsize>) {
+        // Make sure the region can be managed by this allocator.
+        assert!(self.base.addr() <= addr_range.start);
+        assert!(addr_range.end <= self.base.limit());
+
+        let min_block_size = Buddy::<BLK_SIZE, LEVELS, Raw>::min_block_size().unwrap();
+
+        // Require the range bounds to be aligned on block boundaries.
+        assert_eq!(addr_range.start.get() % min_block_size, 0);
+        assert_eq!(addr_range.end.get() % min_block_size, 0);
 
         let min_pow = min_block_size.trailing_zeros();
         let max_pow = BLK_SIZE.trailing_zeros();
 
-        while curs < limit {
-            let curs_pow = curs.trailing_zeros().max(min_pow).min(max_pow);
+        let mut curs = addr_range.start;
+        while curs < addr_range.end {
+            let curs_pow = curs.trailing_zeros().min(max_pow);
+            // Cursor should never go out of alignment with min block size.
+            assert!(curs_pow >= min_pow);
+
             let curs_align = 1 << curs_pow;
-            let curs_ofs = curs - base.addr().get();
+            let curs_ofs = curs.get() - self.base.addr().get();
 
-            let (in_gap, block_end) = match gap {
-                None => (false, limit),
-                Some(ref g) => {
-                    if curs < g.start.get() {
-                        (false, g.start.get())
-                    } else if curs < g.end.get() {
-                        (true, g.end.get())
-                    } else {
-                        gap = gaps.next();
-                        continue;
-                    }
-                }
-            };
+            // Safe unchecked sub: `curs < range.end`
+            let remaining = addr_range.end.get() - curs.get();
+            // Safe unchecked sub and shift: `remaining` is nonzero, so
+            // `remaining.leading_zeros() + 1 <= usize::BITS`
+            let remaining_po2 = 1 << (usize::BITS - (remaining.leading_zeros() + 1));
 
-            // Calculate the size of the largest block that will fit before the
-            // next gap boundary.
-            let block_space = block_end - curs;
-            let block_space_po2 = 1 << (usize::BITS - (block_space.leading_zeros() + 1));
-            let block_size: usize = cmp::min(block_space_po2, curs_align);
+            // Necessarily <= BLK_SIZE, as curs_pow is in the range
+            // [min_pow, max_pow].
+            let block_size: usize = cmp::min(remaining_po2, curs_align);
 
-            // Split all blocks that begin at this cursor position but are too
-            // large to fit before the gap boundary.
+            // Split all blocks that begin at this cursor position but are larger
+            // than `block_size`.
+            //
+            // Note that the blocks may already be split, as sub-blocks may
+            // already have been populated.
             let init_level = (max_pow - curs_pow) as usize;
             let target_level = (max_pow - block_size.trailing_zeros()) as usize;
-            for lv in buddy.levels.iter_mut().take(target_level).skip(init_level) {
+            for lv in self.levels.iter_mut().take(target_level).skip(init_level) {
                 // Mark the block as split.
                 let split_bit = lv.index_of(curs_ofs);
                 if let Some(s) = lv.splits.as_mut() {
@@ -1046,22 +1065,19 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> RawBuddy<BLK_SIZE, LEVELS> {
                 }
             }
 
-            if !in_gap {
-                // If not in a gap, this block should be added to its level's free list.
-                // Toggle the buddy bit for each block added.
-                unsafe {
-                    buddy.levels[target_level]
-                        .free_list_push(buddy.base, NonZeroUsize::new(curs).unwrap());
-                }
+            // Add the block to the appropriate free list.
+            unsafe { self.levels[target_level].free_list_push(self.base, curs) };
 
-                let buddy_bit = buddy.levels[target_level].buddy_bit(curs_ofs);
-                buddy.levels[target_level].buddies.toggle(buddy_bit);
+            // Toggle the corresponding buddy bit.
+            let buddy_bit = self.levels[target_level].buddy_bit(curs_ofs);
+            self.levels[target_level].buddies.toggle(buddy_bit);
+
+            if target_level != 0 && !self.levels[target_level].buddies.get(buddy_bit) {
+                todo!("coalesce");
             }
 
-            curs += block_size;
+            curs = curs.checked_add(block_size).unwrap();
         }
-
-        Ok(buddy)
     }
 
     pub unsafe fn try_new_unpopulated(
@@ -1198,7 +1214,14 @@ where
     type Item = Range<NonZeroUsize>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let mut cur = self.inner.next()?;
+        let mut cur;
+        loop {
+            cur = self.inner.next()?;
+            if !cur.is_empty() {
+                break;
+            }
+        }
+
         let align = self.align;
 
         // Align start down.
@@ -1221,8 +1244,12 @@ where
                 None => break,
             };
 
+            assert!(next.start >= cur.end);
             let next_start = next.start.get() & !(align - 1);
-            if next_start == end {
+
+            if next_start <= end {
+                assert!(next.end >= cur.end);
+
                 // Merge contiguous ranges. `cur.end` will be aligned up on the
                 // next loop iteration.
                 cur.end = next.end;
