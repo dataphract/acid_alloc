@@ -942,7 +942,12 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> RawBuddy<BLK_SIZE, LEVELS> {
 
             unsafe { self.deallocate(self.base.with_addr(curs)) };
 
-            curs = curs.checked_add(block_size).unwrap();
+            // TODO: call curs.checked_add() directly when nonzero_ops is stable
+            curs = curs
+                .get()
+                .checked_add(block_size)
+                .and_then(NonZeroUsize::new)
+                .unwrap();
         }
     }
 
