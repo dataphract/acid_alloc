@@ -200,9 +200,6 @@ impl BuddyLevel {
         block: NonNull<u8>,
         coalesce: bool,
     ) -> Option<NonNull<u8>> {
-        // Immediately drop and shadow the mutable pointer by converting it to
-        // an address. This indicates to the compiler that the base pointer has
-        // sole access to the block.
         let block = block.addr();
         let block_ofs = base.offset_to(block);
         let buddy_bit = self.buddy_bit(block_ofs);
@@ -963,7 +960,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> RawBuddy<BLK_SIZE, LEVELS> {
         }
     }
 
-    pub unsafe fn try_new_with_offset_gaps<I>(
+    unsafe fn try_new_with_offset_gaps<I>(
         metadata: NonNull<u8>,
         base: NonNull<u8>,
         num_blocks: usize,
@@ -987,21 +984,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> RawBuddy<BLK_SIZE, LEVELS> {
     ///
     /// The address ranges in `gaps` are guaranteed not to be read from or
     /// written to.
-    ///
-    /// # Safety
-    ///
-    /// The caller must uphold the following invariants:
-    /// - `gaps` must be an iterator of non-overlapping address ranges in
-    ///   ascending order.
-    /// - `base` must be a pointer to a region that satisfies the [`Layout`]
-    ///   returned by [`Self::region_layout()`], and it must be valid for reads
-    ///   and writes for the entire size indicated by that `Layout`.
-    /// - `metadata` must be a pointer to a region that satisfies the [`Layout`]
-    ///   returned by [`Self::metadata_layout()`], and it must be valid for
-    ///   reads and writes for the entire size indicated by that `Layout`.
-    ///
-    /// [`Layout`]: core::alloc::Layout
-    pub unsafe fn try_new_with_address_gaps<I>(
+    unsafe fn try_new_with_address_gaps<I>(
         metadata: NonNull<u8>,
         base: NonNull<u8>,
         num_blocks: usize,
@@ -1010,6 +993,82 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> RawBuddy<BLK_SIZE, LEVELS> {
     where
         I: IntoIterator<Item = Range<NonZeroUsize>>,
     {
+        let mut buddy = unsafe { Self::try_new_unpopulated(metadata, base, num_blocks) }?;
+
+        let num_blocks = NonZeroUsize::new(num_blocks).ok_or(AllocInitError::InvalidConfig)?;
+        let min_block_size = Buddy::<BLK_SIZE, LEVELS, Raw>::min_block_size()?;
+        let region_layout = Buddy::<BLK_SIZE, LEVELS, Raw>::region_layout_impl(num_blocks)?;
+
+        // Widen the gaps so their boundaries lie on block boundaries.
+        let mut gaps = AlignedRanges::new(gaps.into_iter(), min_block_size);
+        let mut gap: Option<Range<NonZeroUsize>> = gaps.next();
+
+        let mut curs = base.addr().get();
+        let limit = base.addr().get().checked_add(region_layout.size()).unwrap();
+
+        let min_pow = min_block_size.trailing_zeros();
+        let max_pow = BLK_SIZE.trailing_zeros();
+
+        while curs < limit {
+            let curs_pow = curs.trailing_zeros().max(min_pow).min(max_pow);
+            let curs_align = 1 << curs_pow;
+            let curs_ofs = curs - base.addr().get();
+
+            let (in_gap, block_end) = match gap {
+                None => (false, limit),
+                Some(ref g) => {
+                    if curs < g.start.get() {
+                        (false, g.start.get())
+                    } else if curs < g.end.get() {
+                        (true, g.end.get())
+                    } else {
+                        gap = gaps.next();
+                        continue;
+                    }
+                }
+            };
+
+            // Calculate the size of the largest block that will fit before the
+            // next gap boundary.
+            let block_space = block_end - curs;
+            let block_space_po2 = 1 << (usize::BITS - (block_space.leading_zeros() + 1));
+            let block_size: usize = cmp::min(block_space_po2, curs_align);
+
+            // Split all blocks that begin at this cursor position but are too
+            // large to fit before the gap boundary.
+            let init_level = (max_pow - curs_pow) as usize;
+            let target_level = (max_pow - block_size.trailing_zeros()) as usize;
+            for lv in buddy.levels.iter_mut().take(target_level).skip(init_level) {
+                // Mark the block as split.
+                let split_bit = lv.index_of(curs_ofs);
+                if let Some(s) = lv.splits.as_mut() {
+                    s.set(split_bit, true);
+                }
+            }
+
+            if !in_gap {
+                // If not in a gap, this block should be added to its level's free list.
+                // Toggle the buddy bit for each block added.
+                unsafe {
+                    buddy.levels[target_level]
+                        .free_list_push(buddy.base, NonZeroUsize::new(curs).unwrap());
+                }
+
+                let buddy_bit = buddy.levels[target_level].buddy_bit(curs_ofs);
+                buddy.levels[target_level].buddies.toggle(buddy_bit);
+            }
+
+            curs += block_size;
+        }
+
+        Ok(buddy)
+    }
+
+    pub unsafe fn try_new_unpopulated(
+        metadata: NonNull<u8>,
+        base: NonNull<u8>,
+        num_blocks: usize,
+    ) -> Result<RawBuddy<BLK_SIZE, LEVELS>, AllocInitError> {
         let num_blocks = NonZeroUsize::new(num_blocks).ok_or(AllocInitError::InvalidConfig)?;
         let min_block_size = Buddy::<BLK_SIZE, LEVELS, Raw>::min_block_size()?;
         let meta_layout = Buddy::<BLK_SIZE, LEVELS, Raw>::metadata_layout_impl(num_blocks)?;
@@ -1035,6 +1094,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> RawBuddy<BLK_SIZE, LEVELS> {
 
         let mut meta_curs = metadata.as_ptr();
 
+        // Initialize the per-level metadata.
         for (li, level) in levels.iter_mut().enumerate() {
             let block_size = 2_usize.pow((LEVELS - li) as u32 - 1) * min_block_size;
             let block_factor = 2_usize.pow(li as u32);
@@ -1086,7 +1146,8 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> RawBuddy<BLK_SIZE, LEVELS> {
             );
         }
 
-        let mut levels = unsafe {
+        // Convert to an initialized array.
+        let levels = unsafe {
             // TODO: When `MaybeUninit::array_assume_init()` is stable, use that
             // instead.
             //
@@ -1098,67 +1159,6 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> RawBuddy<BLK_SIZE, LEVELS> {
         };
 
         let base = BasePtr::new(base, region_layout.size());
-
-        // Widen the gaps so their boundaries lie on block boundaries.
-        let mut gaps = AlignedRanges::new(gaps.into_iter(), min_block_size);
-        let mut gap: Option<Range<NonZeroUsize>> = gaps.next();
-
-        let mut curs = base.addr().get();
-        let limit = base.addr().get().checked_add(region_layout.size()).unwrap();
-
-        let min_pow = min_block_size.trailing_zeros();
-        let max_pow = BLK_SIZE.trailing_zeros();
-
-        while curs < limit {
-            let curs_pow = curs.trailing_zeros().max(min_pow).min(max_pow);
-            let curs_align = 1 << curs_pow;
-            let curs_ofs = curs - base.addr().get();
-
-            let (in_gap, block_end) = match gap {
-                None => (false, limit),
-                Some(ref g) => {
-                    if curs < g.start.get() {
-                        (false, g.start.get())
-                    } else if curs < g.end.get() {
-                        (true, g.end.get())
-                    } else {
-                        gap = gaps.next();
-                        continue;
-                    }
-                }
-            };
-
-            // Calculate the size of the largest block that will fit before the
-            // next gap boundary.
-            let block_space = block_end - curs;
-            let block_space_po2 = 1 << (usize::BITS - (block_space.leading_zeros() + 1));
-            let block_size: usize = cmp::min(block_space_po2, curs_align);
-
-            // Split all blocks that begin at this cursor position but are too
-            // large to fit before the gap boundary.
-            let init_level = (max_pow - curs_pow) as usize;
-            let target_level = (max_pow - block_size.trailing_zeros()) as usize;
-            for lv in levels.iter_mut().take(target_level).skip(init_level) {
-                // Mark the block as split.
-                let split_bit = lv.index_of(curs_ofs);
-                if let Some(s) = lv.splits.as_mut() {
-                    s.set(split_bit, true);
-                }
-            }
-
-            if !in_gap {
-                // If not in a gap, this block should be added to its level's free list.
-                // Toggle the buddy bit for each block added.
-                unsafe {
-                    levels[target_level].free_list_push(base, NonZeroUsize::new(curs).unwrap());
-                }
-
-                let buddy_bit = levels[target_level].buddy_bit(curs_ofs);
-                levels[target_level].buddies.toggle(buddy_bit);
-            }
-
-            curs += block_size;
-        }
 
         Ok(RawBuddy {
             base,
