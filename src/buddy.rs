@@ -1663,7 +1663,11 @@ mod tests {
             unsafe { Alloc::new_raw_unpopulated(metadata, region, NUM_BLOCKS).unwrap() };
 
         let base_addr = buddy.raw.base.addr();
-        let middle = base_addr.checked_add(BLK_SIZE / 2).unwrap();
+        let middle = base_addr
+            .get()
+            .checked_add(BLK_SIZE / 2)
+            .and_then(NonZeroUsize::new)
+            .unwrap();
         let limit = buddy.raw.base.limit();
 
         let left = base_addr..middle;
