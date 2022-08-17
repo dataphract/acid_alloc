@@ -227,6 +227,18 @@ where
     /// Returns `Err` if the total size and alignment of the region cannot be
     /// represented as a [`Layout`].
     pub fn region_layout(block_size: usize, num_blocks: usize) -> Result<Layout, AllocInitError> {
+        // Round block size up to the alignment of BlockLink.
+        let block_size = {
+            let align = mem::align_of::<BlockLink>();
+
+            // Safe unchecked sub: align is always nonzero
+            let up = block_size
+                .checked_add(align)
+                .ok_or(AllocInitError::InvalidConfig)?
+                - 1;
+            up & !(align - 1)
+        };
+
         let total_size = block_size
             .checked_mul(num_blocks)
             .ok_or(AllocInitError::InvalidConfig)?;
@@ -496,9 +508,22 @@ impl RawSlab {
         block_size: usize,
         num_blocks: usize,
     ) -> Result<RawSlab, AllocInitError> {
+        assert_eq!(region.addr().get() % mem::align_of::<BlockLink>(), 0);
+
         if block_size < mem::size_of::<BlockLink>() {
             return Err(AllocInitError::InvalidConfig);
         }
+
+        // Round block size up to the alignment of BlockLink.
+        let block_size = {
+            let align = mem::align_of::<BlockLink>();
+
+            // Safe unchecked sub: align is always nonzero
+            let up = block_size.checked_add(align).unwrap() - 1;
+            up & !(align - 1)
+        };
+
+        assert_eq!(block_size % mem::align_of::<BlockLink>(), 0);
 
         // Ensure the region size fits in a usize.
         let layout = Slab::<Raw>::region_layout(block_size, num_blocks)
@@ -537,6 +562,8 @@ impl RawSlab {
                 // not to have overflown.
                 unsafe { NonZeroUsize::new_unchecked(next_addr) }
             });
+
+            assert_eq!(block_addr.get() % mem::align_of::<BlockLink>(), 0);
 
             unsafe { base.init_link_at(block_addr, BlockLink { next }) };
         }
