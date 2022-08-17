@@ -331,24 +331,15 @@ impl BuddyLevel {
 ///
 /// [module-level documentation]: crate::buddy
 pub struct Buddy<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> {
-    /// Pointer to the region managed by this allocator.
-    base: BasePtr,
-    /// Pointer to the region that backs the bitmaps.
-    ///
-    /// This must not be used while the allocator exists; it is stored solely so
-    /// that it may be deallocated or returned via `into_raw_parts()`.
-    metadata: NonNull<u8>,
-    /// The number of level-zero blocks managed by this allocator.
-    num_blocks: NonZeroUsize,
-    levels: [BuddyLevel; LEVELS],
+    raw: RawBuddy<BLK_SIZE, LEVELS>,
     backing_allocator: A,
 }
 
-unsafe impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> Send
+unsafe impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator + Send> Send
     for Buddy<BLK_SIZE, LEVELS, A>
 {
 }
-unsafe impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> Sync
+unsafe impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator + Sync> Sync
     for Buddy<BLK_SIZE, LEVELS, A>
 {
 }
@@ -381,6 +372,30 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> Buddy<BLK_SIZE, LEVELS, Raw> {
         num_blocks: usize,
     ) -> Result<Buddy<BLK_SIZE, LEVELS, Raw>, AllocInitError> {
         unsafe { Self::new_raw_with_address_gaps(metadata, region, num_blocks, iter::empty()) }
+    }
+
+    /// Constructs a new `Buddy` from raw pointers without populating it.
+    ///
+    /// TODO
+    pub unsafe fn new_raw_unpopulated(
+        metadata: NonNull<u8>,
+        region: NonNull<u8>,
+        num_blocks: usize,
+    ) -> Result<Buddy<BLK_SIZE, LEVELS, Raw>, AllocInitError> {
+        unsafe {
+            RawBuddy::<BLK_SIZE, LEVELS>::try_new_unpopulated(metadata, region, num_blocks)
+                .map(|p| p.with_backing_allocator(Raw))
+        }
+    }
+
+    /// Populates a region not already managed by this allocator.
+    ///
+    /// # Safety
+    ///
+    /// `range` must be a range of addresses not already managed by this
+    /// allocator.
+    pub unsafe fn populate_region(&mut self, addr_range: Range<NonZeroUsize>) {
+        unsafe { self.raw.populate_region(addr_range) };
     }
 
     /// Constructs a new `Buddy` from raw pointers, with gaps specified by
@@ -718,6 +733,329 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> Buddy<BLK_
     #[cfg(test)]
     #[inline]
     fn enumerate_free_list(&self, level: usize) -> usize {
+        self.raw.enumerate_free_list(level)
+    }
+
+    /// Attempts to allocate a block of memory.
+    ///
+    /// On success, returns a [`NonNull<[u8]>`][0] which satisfies `layout`.
+    ///
+    /// The contents of the block are uninitialized.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if a suitable block could not be allocated.
+    ///
+    /// [0]: core::ptr::NonNull
+    pub fn allocate(&mut self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        self.raw.allocate(layout)
+    }
+
+    /// Deallocates the memory referenced by `ptr`.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must denote a block of memory [*currently allocated*] via this allocator.
+    ///
+    /// [*currently allocated*]: https://doc.rust-lang.org/nightly/alloc/alloc/trait.Allocator.html#currently-allocated-memory
+    pub unsafe fn deallocate(&mut self, ptr: NonNull<u8>) {
+        unsafe { self.raw.deallocate(ptr) }
+    }
+
+    /// Returns a pointer to the managed region.
+    ///
+    /// # Safety
+    ///
+    /// Calling this function cannot cause undefined behavior. However:
+    /// - Reading from the returned pointer, including upgrading it to a
+    ///   reference, is undefined behavior if there are any outstanding
+    ///   allocations.
+    /// - Writing to the returned pointer, including upgrading it to a mutable
+    ///   reference, is _always_ undefined behavior.
+    pub fn region(&mut self) -> NonNull<[u8]> {
+        self.raw.region()
+    }
+}
+
+impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> fmt::Debug
+    for Buddy<BLK_SIZE, LEVELS, A>
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Buddy")
+            .field("metadata", &self.raw.metadata)
+            .field("base", &self.raw.base.ptr())
+            .field("num_blocks", &self.raw.num_blocks)
+            .finish()
+    }
+}
+
+impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> Drop
+    for Buddy<BLK_SIZE, LEVELS, A>
+{
+    fn drop(&mut self) {
+        let region = self.raw.base.ptr();
+        let metadata = self.raw.metadata;
+        let num_blocks = self.raw.num_blocks;
+
+        let region_layout = Self::region_layout_impl(num_blocks).unwrap();
+        let metadata_layout = Self::metadata_layout_impl(num_blocks).unwrap();
+
+        unsafe {
+            self.backing_allocator.deallocate(region, region_layout);
+            self.backing_allocator.deallocate(metadata, metadata_layout);
+        }
+    }
+}
+
+/// Like a `Buddy`, but without a `Drop` impl or an associated
+/// allocator.
+///
+/// This assists in tacking on the allocator type parameter because this struct can be
+/// moved out of, while `Buddy` itself cannot.
+struct RawBuddy<const BLK_SIZE: usize, const LEVELS: usize> {
+    base: BasePtr,
+    metadata: NonNull<u8>,
+    num_blocks: NonZeroUsize,
+    levels: [BuddyLevel; LEVELS],
+}
+
+impl<const BLK_SIZE: usize, const LEVELS: usize> RawBuddy<BLK_SIZE, LEVELS> {
+    fn with_backing_allocator<A: BackingAllocator>(
+        self,
+        backing_allocator: A,
+    ) -> Buddy<BLK_SIZE, LEVELS, A> {
+        Buddy {
+            raw: self,
+            backing_allocator,
+        }
+    }
+
+    unsafe fn try_new_with_offset_gaps<I>(
+        metadata: NonNull<u8>,
+        base: NonNull<u8>,
+        num_blocks: usize,
+        gaps: I,
+    ) -> Result<RawBuddy<BLK_SIZE, LEVELS>, AllocInitError>
+    where
+        I: IntoIterator<Item = Range<usize>>,
+    {
+        let region_addr = base.addr().get();
+
+        let gaps = gaps.into_iter().map(|ofs| {
+            let start = NonZeroUsize::new(region_addr.checked_add(ofs.start).unwrap()).unwrap();
+            let end = NonZeroUsize::new(region_addr.checked_add(ofs.end).unwrap()).unwrap();
+            start..end
+        });
+
+        unsafe { Self::try_new_with_address_gaps(metadata, base, num_blocks, gaps) }
+    }
+
+    /// Construct a new `RawBuddy` from raw pointers, with internal gaps.
+    ///
+    /// The address ranges in `gaps` are guaranteed not to be read from or
+    /// written to.
+    unsafe fn try_new_with_address_gaps<I>(
+        metadata: NonNull<u8>,
+        base: NonNull<u8>,
+        num_blocks: usize,
+        gaps: I,
+    ) -> Result<RawBuddy<BLK_SIZE, LEVELS>, AllocInitError>
+    where
+        I: IntoIterator<Item = Range<NonZeroUsize>>,
+    {
+        let mut buddy = unsafe { Self::try_new_unpopulated(metadata, base, num_blocks) }?;
+
+        let min_block_size = Buddy::<BLK_SIZE, LEVELS, Raw>::min_block_size().unwrap();
+        let gaps = AlignedRanges::new(gaps.into_iter(), min_block_size);
+
+        let mut start = buddy.base.addr();
+        for gap in gaps {
+            let end = gap.start;
+            unsafe { buddy.populate_region(start..end) };
+            start = gap.end;
+        }
+        let end = buddy.base.limit();
+
+        unsafe { buddy.populate_region(start..end) };
+
+        Ok(buddy)
+    }
+
+    unsafe fn populate_region(&mut self, addr_range: Range<NonZeroUsize>) {
+        // Make sure the region can be managed by this allocator.
+        assert!(self.base.addr() <= addr_range.start);
+        assert!(addr_range.end <= self.base.limit());
+
+        let min_block_size = Self::min_block_size().unwrap();
+
+        // Require the range bounds to be aligned on block boundaries.
+        assert_eq!(addr_range.start.get() % min_block_size, 0);
+        assert_eq!(addr_range.end.get() % min_block_size, 0);
+
+        let min_pow = min_block_size.trailing_zeros();
+        let max_pow = BLK_SIZE.trailing_zeros();
+
+        let mut curs = addr_range.start;
+        while curs < addr_range.end {
+            let curs_pow = curs.trailing_zeros().min(max_pow);
+            // Cursor should never go out of alignment with min block size.
+            assert!(curs_pow >= min_pow);
+
+            let curs_align = 1 << curs_pow;
+            let curs_ofs = curs.get() - self.base.addr().get();
+
+            // Safe unchecked sub: `curs < range.end`
+            let remaining = addr_range.end.get() - curs.get();
+            // Safe unchecked sub and shift: `remaining` is nonzero, so
+            // `remaining.leading_zeros() + 1 <= usize::BITS`
+            let remaining_po2 = 1 << (usize::BITS - (remaining.leading_zeros() + 1));
+
+            // Necessarily <= BLK_SIZE, as curs_pow is in the range
+            // [min_pow, max_pow].
+            let block_size: usize = cmp::min(remaining_po2, curs_align);
+
+            // Split all blocks that begin at this cursor position but are larger
+            // than `block_size`.
+            //
+            // Note that the blocks may already be split, as sub-blocks may
+            // already have been populated.
+            let init_level = (max_pow - curs_pow) as usize;
+            let target_level = (max_pow - block_size.trailing_zeros()) as usize;
+            for lv in self.levels.iter_mut().take(target_level).skip(init_level) {
+                // Mark the block as split.
+                let split_bit = lv.index_of(curs_ofs);
+                if let Some(s) = lv.splits.as_mut() {
+                    s.set(split_bit, true);
+                }
+            }
+
+            unsafe { self.deallocate(self.base.with_addr(curs)) };
+
+            curs = curs.checked_add(block_size).unwrap();
+        }
+    }
+
+    pub unsafe fn try_new_unpopulated(
+        metadata: NonNull<u8>,
+        base: NonNull<u8>,
+        num_blocks: usize,
+    ) -> Result<RawBuddy<BLK_SIZE, LEVELS>, AllocInitError> {
+        let num_blocks = NonZeroUsize::new(num_blocks).ok_or(AllocInitError::InvalidConfig)?;
+        let min_block_size = Buddy::<BLK_SIZE, LEVELS, Raw>::min_block_size()?;
+        let meta_layout = Buddy::<BLK_SIZE, LEVELS, Raw>::metadata_layout_impl(num_blocks)?;
+        let region_layout = Buddy::<BLK_SIZE, LEVELS, Raw>::region_layout_impl(num_blocks)?;
+
+        // Ensure pointer calculations will not overflow.
+        // TODO: use checked_add directly on NonNull when nonzero_ops is stable.
+        let meta_end = metadata
+            .addr()
+            .get()
+            .checked_add(meta_layout.size())
+            .ok_or(AllocInitError::InvalidLocation)?;
+        base.addr()
+            .get()
+            .checked_add(region_layout.size())
+            .ok_or(AllocInitError::InvalidLocation)?;
+
+        // TODO: use MaybeUninit::uninit_array when not feature gated
+        let mut levels: [MaybeUninit<BuddyLevel>; LEVELS] = unsafe {
+            // SAFETY: An uninitialized `[MaybeUninit<_>; _]` is valid.
+            MaybeUninit::<[MaybeUninit<BuddyLevel>; LEVELS]>::uninit().assume_init()
+        };
+
+        let mut meta_curs = metadata.as_ptr();
+
+        // Initialize the per-level metadata.
+        for (li, level) in levels.iter_mut().enumerate() {
+            let block_size = 2_usize.pow((LEVELS - li) as u32 - 1) * min_block_size;
+            let block_factor = 2_usize.pow(li as u32);
+            let num_blocks = block_factor * num_blocks.get();
+            let num_pairs = (num_blocks + 1) / 2;
+
+            let buddy_size = Bitmap::map_layout(num_pairs).size();
+            let buddy_bitmap = unsafe { Bitmap::new(num_pairs, meta_curs as *mut u64) };
+
+            meta_curs = unsafe {
+                meta_curs.offset(
+                    buddy_size
+                        .try_into()
+                        .expect("buddy bitmap layout size overflows isize"),
+                )
+            };
+
+            let split_bitmap = if li < LEVELS - 1 {
+                let split_size = Bitmap::map_layout(num_blocks).size();
+                let split_bitmap = unsafe { Bitmap::new(num_blocks, meta_curs as *mut u64) };
+
+                meta_curs = unsafe {
+                    meta_curs.offset(
+                        split_size
+                            .try_into()
+                            .expect("split bitmap layout size overflows isize"),
+                    )
+                };
+
+                Some(split_bitmap)
+            } else {
+                None
+            };
+
+            unsafe {
+                level.as_mut_ptr().write(BuddyLevel {
+                    block_size,
+                    block_pow: block_size.trailing_zeros(),
+                    free_list: None,
+                    buddies: buddy_bitmap,
+                    splits: split_bitmap,
+                });
+            }
+        }
+
+        if meta_curs.addr() > meta_end {
+            panic!(
+                "metadata cursor overran layout size: curs = {meta_end}, layout = {meta_layout:?}"
+            );
+        }
+
+        // Convert to an initialized array.
+        let levels = unsafe {
+            // TODO: When `MaybeUninit::array_assume_init()` is stable, use that
+            // instead.
+            //
+            // SAFETY:
+            // - `levels` is fully initialized.
+            // - `MaybeUninit<T>` and `T` have the same layout.
+            // - `MaybeUninit<T>` won't drop `T`, so no double-frees.
+            (&levels as *const _ as *const [BuddyLevel; LEVELS]).read()
+        };
+
+        let base = BasePtr::new(base, region_layout.size());
+
+        Ok(RawBuddy {
+            base,
+            metadata,
+            num_blocks,
+            levels,
+        })
+    }
+
+    const fn min_block_size() -> Result<usize, AllocInitError> {
+        if LEVELS == 0 || !BLK_SIZE.is_power_of_two() || LEVELS >= usize::BITS as usize {
+            return Err(AllocInitError::InvalidConfig);
+        }
+
+        let min_block_size = BLK_SIZE >> (LEVELS - 1);
+
+        if min_block_size < mem::size_of::<DoubleBlockLink>() {
+            return Err(AllocInitError::InvalidConfig);
+        }
+
+        Ok(min_block_size)
+    }
+
+    #[cfg(test)]
+    #[inline]
+    fn enumerate_free_list(&self, level: usize) -> usize {
         self.levels[level].enumerate_free_list(self.base)
     }
 
@@ -877,311 +1215,6 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> Buddy<BLK_
             self.num_blocks.get() * BLK_SIZE,
         ))
         .unwrap()
-    }
-
-    /// Decomposes the allocator into its raw components.
-    ///
-    /// The returned tuple contains the region pointer and the metadata pointer.
-    ///
-    /// # Safety
-    ///
-    /// All outstanding allocations are invalidated when this method is called;
-    /// the returned region pointer becomes the sole owner of the region that
-    /// was used to construct the allocator. As such, all allocations made from
-    /// this allocator should be either freed or forgotten before calling this
-    /// method.
-    pub unsafe fn into_raw_parts(self) -> (NonNull<u8>, NonNull<u8>) {
-        let Buddy { base, metadata, .. } = self;
-
-        (base.ptr(), metadata)
-    }
-}
-
-impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> fmt::Debug
-    for Buddy<BLK_SIZE, LEVELS, A>
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Buddy")
-            .field("metadata", &self.metadata)
-            .field("base", &self.base.ptr())
-            .field("num_blocks", &self.num_blocks)
-            .finish()
-    }
-}
-
-impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> Drop
-    for Buddy<BLK_SIZE, LEVELS, A>
-{
-    fn drop(&mut self) {
-        let region = self.base.ptr();
-        let metadata = self.metadata;
-        let num_blocks = self.num_blocks;
-
-        let region_layout = Self::region_layout_impl(num_blocks).unwrap();
-        let metadata_layout = Self::metadata_layout_impl(num_blocks).unwrap();
-
-        unsafe {
-            self.backing_allocator.deallocate(region, region_layout);
-            self.backing_allocator.deallocate(metadata, metadata_layout);
-        }
-    }
-}
-
-/// Like a `Buddy`, but without a `Drop` impl or an associated
-/// allocator.
-///
-/// This assists in tacking on the allocator type parameter because this struct can be
-/// moved out of, while `Buddy` itself cannot.
-struct RawBuddy<const BLK_SIZE: usize, const LEVELS: usize> {
-    base: BasePtr,
-    metadata: NonNull<u8>,
-    num_blocks: NonZeroUsize,
-    levels: [BuddyLevel; LEVELS],
-}
-
-impl<const BLK_SIZE: usize, const LEVELS: usize> RawBuddy<BLK_SIZE, LEVELS> {
-    fn with_backing_allocator<A: BackingAllocator>(
-        self,
-        backing_allocator: A,
-    ) -> Buddy<BLK_SIZE, LEVELS, A> {
-        let RawBuddy {
-            base,
-            metadata,
-            num_blocks,
-            levels,
-        } = self;
-
-        Buddy {
-            base,
-            metadata,
-            num_blocks,
-            levels,
-            backing_allocator,
-        }
-    }
-
-    unsafe fn try_new_with_offset_gaps<I>(
-        metadata: NonNull<u8>,
-        base: NonNull<u8>,
-        num_blocks: usize,
-        gaps: I,
-    ) -> Result<RawBuddy<BLK_SIZE, LEVELS>, AllocInitError>
-    where
-        I: IntoIterator<Item = Range<usize>>,
-    {
-        let region_addr = base.addr().get();
-
-        let gaps = gaps.into_iter().map(|ofs| {
-            let start = NonZeroUsize::new(region_addr.checked_add(ofs.start).unwrap()).unwrap();
-            let end = NonZeroUsize::new(region_addr.checked_add(ofs.end).unwrap()).unwrap();
-            start..end
-        });
-
-        unsafe { Self::try_new_with_address_gaps(metadata, base, num_blocks, gaps) }
-    }
-
-    /// Construct a new `RawBuddy` from raw pointers, with internal gaps.
-    ///
-    /// The address ranges in `gaps` are guaranteed not to be read from or
-    /// written to.
-    unsafe fn try_new_with_address_gaps<I>(
-        metadata: NonNull<u8>,
-        base: NonNull<u8>,
-        num_blocks: usize,
-        gaps: I,
-    ) -> Result<RawBuddy<BLK_SIZE, LEVELS>, AllocInitError>
-    where
-        I: IntoIterator<Item = Range<NonZeroUsize>>,
-    {
-        let mut buddy = unsafe { Self::try_new_unpopulated(metadata, base, num_blocks) }?;
-
-        let min_block_size = Buddy::<BLK_SIZE, LEVELS, Raw>::min_block_size().unwrap();
-        let gaps = AlignedRanges::new(gaps.into_iter(), min_block_size);
-
-        let mut start = buddy.base.addr();
-        for gap in gaps {
-            let end = gap.start;
-            unsafe { buddy.populate_region(start..end) };
-            start = gap.end;
-        }
-        let end = buddy.base.limit();
-
-        unsafe { buddy.populate_region(start..end) };
-
-        Ok(buddy)
-    }
-
-    /// Populates a region not already managed by this allocator.
-    ///
-    /// # Safety
-    ///
-    /// `range` must be a range of addresses not already managed by this
-    /// allocator.
-    unsafe fn populate_region(&mut self, addr_range: Range<NonZeroUsize>) {
-        // Make sure the region can be managed by this allocator.
-        assert!(self.base.addr() <= addr_range.start);
-        assert!(addr_range.end <= self.base.limit());
-
-        let min_block_size = Buddy::<BLK_SIZE, LEVELS, Raw>::min_block_size().unwrap();
-
-        // Require the range bounds to be aligned on block boundaries.
-        assert_eq!(addr_range.start.get() % min_block_size, 0);
-        assert_eq!(addr_range.end.get() % min_block_size, 0);
-
-        let min_pow = min_block_size.trailing_zeros();
-        let max_pow = BLK_SIZE.trailing_zeros();
-
-        let mut curs = addr_range.start;
-        while curs < addr_range.end {
-            let curs_pow = curs.trailing_zeros().min(max_pow);
-            // Cursor should never go out of alignment with min block size.
-            assert!(curs_pow >= min_pow);
-
-            let curs_align = 1 << curs_pow;
-            let curs_ofs = curs.get() - self.base.addr().get();
-
-            // Safe unchecked sub: `curs < range.end`
-            let remaining = addr_range.end.get() - curs.get();
-            // Safe unchecked sub and shift: `remaining` is nonzero, so
-            // `remaining.leading_zeros() + 1 <= usize::BITS`
-            let remaining_po2 = 1 << (usize::BITS - (remaining.leading_zeros() + 1));
-
-            // Necessarily <= BLK_SIZE, as curs_pow is in the range
-            // [min_pow, max_pow].
-            let block_size: usize = cmp::min(remaining_po2, curs_align);
-
-            // Split all blocks that begin at this cursor position but are larger
-            // than `block_size`.
-            //
-            // Note that the blocks may already be split, as sub-blocks may
-            // already have been populated.
-            let init_level = (max_pow - curs_pow) as usize;
-            let target_level = (max_pow - block_size.trailing_zeros()) as usize;
-            for lv in self.levels.iter_mut().take(target_level).skip(init_level) {
-                // Mark the block as split.
-                let split_bit = lv.index_of(curs_ofs);
-                if let Some(s) = lv.splits.as_mut() {
-                    s.set(split_bit, true);
-                }
-            }
-
-            // Add the block to the appropriate free list.
-            unsafe { self.levels[target_level].free_list_push(self.base, curs) };
-
-            // Toggle the corresponding buddy bit.
-            let buddy_bit = self.levels[target_level].buddy_bit(curs_ofs);
-            self.levels[target_level].buddies.toggle(buddy_bit);
-
-            if target_level != 0 && !self.levels[target_level].buddies.get(buddy_bit) {
-                todo!("coalesce");
-            }
-
-            curs = curs.checked_add(block_size).unwrap();
-        }
-    }
-
-    pub unsafe fn try_new_unpopulated(
-        metadata: NonNull<u8>,
-        base: NonNull<u8>,
-        num_blocks: usize,
-    ) -> Result<RawBuddy<BLK_SIZE, LEVELS>, AllocInitError> {
-        let num_blocks = NonZeroUsize::new(num_blocks).ok_or(AllocInitError::InvalidConfig)?;
-        let min_block_size = Buddy::<BLK_SIZE, LEVELS, Raw>::min_block_size()?;
-        let meta_layout = Buddy::<BLK_SIZE, LEVELS, Raw>::metadata_layout_impl(num_blocks)?;
-        let region_layout = Buddy::<BLK_SIZE, LEVELS, Raw>::region_layout_impl(num_blocks)?;
-
-        // Ensure pointer calculations will not overflow.
-        // TODO: use checked_add directly on NonNull when nonzero_ops is stable.
-        let meta_end = metadata
-            .addr()
-            .get()
-            .checked_add(meta_layout.size())
-            .ok_or(AllocInitError::InvalidLocation)?;
-        base.addr()
-            .get()
-            .checked_add(region_layout.size())
-            .ok_or(AllocInitError::InvalidLocation)?;
-
-        // TODO: use MaybeUninit::uninit_array when not feature gated
-        let mut levels: [MaybeUninit<BuddyLevel>; LEVELS] = unsafe {
-            // SAFETY: An uninitialized `[MaybeUninit<_>; _]` is valid.
-            MaybeUninit::<[MaybeUninit<BuddyLevel>; LEVELS]>::uninit().assume_init()
-        };
-
-        let mut meta_curs = metadata.as_ptr();
-
-        // Initialize the per-level metadata.
-        for (li, level) in levels.iter_mut().enumerate() {
-            let block_size = 2_usize.pow((LEVELS - li) as u32 - 1) * min_block_size;
-            let block_factor = 2_usize.pow(li as u32);
-            let num_blocks = block_factor * num_blocks.get();
-            let num_pairs = (num_blocks + 1) / 2;
-
-            let buddy_size = Bitmap::map_layout(num_pairs).size();
-            let buddy_bitmap = unsafe { Bitmap::new(num_pairs, meta_curs as *mut u64) };
-
-            meta_curs = unsafe {
-                meta_curs.offset(
-                    buddy_size
-                        .try_into()
-                        .expect("buddy bitmap layout size overflows isize"),
-                )
-            };
-
-            let split_bitmap = if li < LEVELS - 1 {
-                let split_size = Bitmap::map_layout(num_blocks).size();
-                let split_bitmap = unsafe { Bitmap::new(num_blocks, meta_curs as *mut u64) };
-
-                meta_curs = unsafe {
-                    meta_curs.offset(
-                        split_size
-                            .try_into()
-                            .expect("split bitmap layout size overflows isize"),
-                    )
-                };
-
-                Some(split_bitmap)
-            } else {
-                None
-            };
-
-            unsafe {
-                level.as_mut_ptr().write(BuddyLevel {
-                    block_size,
-                    block_pow: block_size.trailing_zeros(),
-                    free_list: None,
-                    buddies: buddy_bitmap,
-                    splits: split_bitmap,
-                });
-            }
-        }
-
-        if meta_curs.addr() > meta_end {
-            panic!(
-                "metadata cursor overran layout size: curs = {meta_end}, layout = {meta_layout:?}"
-            );
-        }
-
-        // Convert to an initialized array.
-        let levels = unsafe {
-            // TODO: When `MaybeUninit::array_assume_init()` is stable, use that
-            // instead.
-            //
-            // SAFETY:
-            // - `levels` is fully initialized.
-            // - `MaybeUninit<T>` and `T` have the same layout.
-            // - `MaybeUninit<T>` won't drop `T`, so no double-frees.
-            (&levels as *const _ as *const [BuddyLevel; LEVELS]).read()
-        };
-
-        let base = BasePtr::new(base, region_layout.size());
-
-        Ok(RawBuddy {
-            base,
-            metadata,
-            num_blocks,
-            levels,
-        })
     }
 }
 
@@ -1548,7 +1581,7 @@ mod tests {
         // [ X | X | s | F |   |   |   |   ]
         // [ | | | |X|F| | | | | | | | | | ]
         let mut allocator = Alloc::try_new_with_offset_gaps(2, [0..72]).unwrap();
-        std::println!("base = {:08x}", allocator.base.addr().get());
+        std::println!("base = {:08x}", allocator.raw.base.addr().get());
 
         // [       s       |       F       ] 128
         // [   s   |   s   |       |       ]  64
@@ -1581,7 +1614,7 @@ mod tests {
         assert_eq!(allocator.enumerate_free_list(1), 0);
         assert_eq!(allocator.enumerate_free_list(2), 0);
         assert_eq!(allocator.enumerate_free_list(3), 2);
-        for lev in allocator.levels.iter() {
+        for lev in allocator.raw.levels.iter() {
             for bit in lev.buddies.iter() {
                 let s = if bit { "1" } else { "0" };
 
@@ -1596,5 +1629,55 @@ mod tests {
         // [ X | X | s | F |   |   |   |   ]  32
         // [ | | | |X|F| | | | | | | | | | ]  16
         unsafe { allocator.deallocate(b.cast()) };
+    }
+
+    #[test]
+    fn populate_coalesce() {
+        const BLK_SIZE: usize = 128;
+        const LEVELS: usize = 2;
+        type Alloc = Buddy<BLK_SIZE, LEVELS, Raw>;
+        const NUM_BLOCKS: usize = 1;
+
+        let region_layout = Alloc::region_layout(NUM_BLOCKS).unwrap();
+        let metadata_layout = Alloc::metadata_layout(NUM_BLOCKS).unwrap();
+        let region = NonNull::new(unsafe { std::alloc::alloc(region_layout) }).unwrap();
+        let metadata = NonNull::new(unsafe { std::alloc::alloc(metadata_layout) }).unwrap();
+
+        let mut buddy =
+            unsafe { Alloc::new_raw_unpopulated(metadata, region, NUM_BLOCKS).unwrap() };
+
+        let base_addr = buddy.raw.base.addr();
+        let middle = base_addr.checked_add(BLK_SIZE / 2).unwrap();
+        let limit = buddy.raw.base.limit();
+
+        let left = base_addr..middle;
+        let right = middle..limit;
+
+        let half_layout = Layout::from_size_align(BLK_SIZE / 2, BLK_SIZE / 2).unwrap();
+        let full_layout = Layout::from_size_align(BLK_SIZE, BLK_SIZE).unwrap();
+
+        // The allocator is unpopulated, so this should fail.
+        buddy.allocate(half_layout).unwrap_err();
+
+        // Populate the left block.
+        unsafe { buddy.populate_region(left) };
+
+        // Now that the left half is populated, allocation should succeed.
+        let left_blk = buddy.allocate(half_layout).unwrap();
+        unsafe { buddy.deallocate(left_blk.cast()) };
+
+        // Populate the right block. This should cause the blocks to coalesce.
+        unsafe { buddy.populate_region(right) };
+
+        // Since both halves have been populated and coalesced, this should succeed.
+        let full_blk = buddy.allocate(full_layout).unwrap();
+        unsafe { buddy.deallocate(full_blk.cast()) };
+
+        drop(buddy);
+
+        unsafe {
+            std::alloc::dealloc(region.as_ptr(), region_layout);
+            std::alloc::dealloc(metadata.as_ptr(), metadata_layout);
+        }
     }
 }
