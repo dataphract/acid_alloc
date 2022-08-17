@@ -376,7 +376,18 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> Buddy<BLK_SIZE, LEVELS, Raw> {
 
     /// Constructs a new `Buddy` from raw pointers without populating it.
     ///
-    /// TODO
+    /// # Safety
+    ///
+    /// - `region` must be a pointer to a region that satisfies the [`Layout`]
+    ///   returned by [`Self::region_layout(num_blocks)`].
+    /// - `metadata` must be a pointer to a region that satisfies the [`Layout`]
+    ///   returned by [`Self::metadata_layout(num_blocks)`], and it must be
+    ///   valid for reads and writes for the entire size indicated by that
+    ///   `Layout`.
+    ///
+    /// [`Self::region_layout(num_blocks)`]: Self::region_layout
+    /// [`Self::metadata_layout(num_blocks)`]: Self::metadata_layout
+    /// [`Layout`]: core::alloc::Layout
     pub unsafe fn new_raw_unpopulated(
         metadata: NonNull<u8>,
         region: NonNull<u8>,
