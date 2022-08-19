@@ -2,45 +2,54 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use core::{alloc::Layout, mem::MaybeUninit, ptr::NonNull, slice};
-use std::cmp;
+
+/// A wrapper around `Layout` which implements `Arbitrary`.
+#[derive(Clone, Debug)]
+pub struct ArbLayout(pub Layout);
+
+impl arbitrary::Arbitrary<'_> for ArbLayout {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        // Select a random bit index and shift to obtain a power of two.
+        let align_shift = u8::arbitrary(u)? % (usize::BITS - 1) as u8;
+
+        let align: usize = 1 << align_shift;
+        assert!(align.is_power_of_two());
+
+        let size = usize::arbitrary(u)? % (isize::MAX as usize - (align - 1));
+
+        let layout = match Layout::from_size_align(size, align) {
+            Ok(l) => l,
+            Err(_) => {
+                panic!("invalid layout params: size=0x{size:X} align=0x{align:X}");
+            }
+        };
+
+        Ok(ArbLayout(layout))
+    }
+}
 
 #[derive(arbitrary::Arbitrary)]
 enum AllocatorOpTag {
     Alloc,
     Dealloc,
+    Custom,
 }
 
 #[derive(Clone, Debug)]
-pub enum AllocatorOp {
+pub enum AllocatorOp<T: for<'a> arbitrary::Arbitrary<'a>> {
     Alloc(Layout),
     Dealloc(usize),
+    Custom(T),
 }
 
-impl arbitrary::Arbitrary<'_> for AllocatorOp {
+impl<T: for<'a> arbitrary::Arbitrary<'a>> arbitrary::Arbitrary<'_> for AllocatorOp<T> {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let tag = AllocatorOpTag::arbitrary(u)?;
 
         let op = match tag {
-            AllocatorOpTag::Alloc => {
-                // Select a random bit index and shift to obtain a power of two.
-                let align_shift = u8::arbitrary(u)? % usize::BITS as u8;
-                let align: usize = 1 << align_shift;
-                assert!(align.is_power_of_two());
-
-                // Clamp size to prevent Layout creation errors.
-                let size = cmp::min(usize::arbitrary(u)?, isize::MAX as usize - (align - 1));
-
-                let layout = match Layout::from_size_align(size, align) {
-                    Ok(l) => l,
-                    Err(_) => {
-                        panic!("invalid layout params: size=0x{size:X} align=0x{align:X}");
-                    }
-                };
-
-                AllocatorOp::Alloc(layout)
-            }
-
+            AllocatorOpTag::Alloc => AllocatorOp::Alloc(ArbLayout::arbitrary(u)?.0),
             AllocatorOpTag::Dealloc => AllocatorOp::Dealloc(usize::arbitrary(u)?),
+            AllocatorOpTag::Custom => AllocatorOp::Custom(T::arbitrary(u)?),
         };
 
         Ok(op)
@@ -48,6 +57,7 @@ impl arbitrary::Arbitrary<'_> for AllocatorOp {
 }
 
 pub trait Subject {
+    type Op: for<'a> arbitrary::Arbitrary<'a>;
     type AllocError;
 
     /// Allocates a block of memory according to `layout`.
@@ -60,9 +70,45 @@ pub trait Subject {
     /// `ptr` must denote a block of memory currently allocated by this
     /// allocator, and it must have been allocated with `layout`.
     unsafe fn deallocate(&mut self, ptr: NonNull<u8>, layout: Layout);
+
+    fn handle_custom_op(&mut self, op: Self::Op) {
+        // To silence the unused variable warning.
+        drop(op);
+    }
 }
 
-struct Block {
+/// A list of allocated blocks.
+pub struct Blocks {
+    blocks: Vec<Block>,
+}
+
+impl Blocks {
+    pub fn new() -> Blocks {
+        Blocks { blocks: Vec::new() }
+    }
+
+    pub fn push(&mut self, block: Block) {
+        self.blocks.push(block);
+    }
+
+    pub fn remove_modulo(&mut self, idx: usize) -> Option<Block> {
+        let len = self.blocks.len();
+        (len != 0).then(|| self.blocks.swap_remove(idx % len))
+    }
+}
+
+impl IntoIterator for Blocks {
+    type Item = Block;
+
+    type IntoIter = std::vec::IntoIter<Block>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.blocks.into_iter()
+    }
+}
+
+/// An allocated block of memory.
+pub struct Block {
     // A pointer to the allocated region.
     ptr: NonNull<[u8]>,
     // The original allocation layout.
@@ -71,9 +117,11 @@ struct Block {
     id: u64,
 }
 
-unsafe fn paint(ptr: NonNull<[u8]>, id: u64) {
-    let slice: &mut [MaybeUninit<u8>] =
-        unsafe { slice::from_raw_parts_mut(ptr.cast().as_ptr(), ptr.len()) };
+unsafe fn slice_ptr_to_uninit_slice_mut<'a>(ptr: NonNull<[u8]>) -> &'a mut [MaybeUninit<u8>] {
+    unsafe { slice::from_raw_parts_mut(ptr.cast().as_ptr(), ptr.len()) }
+}
+
+unsafe fn paint(slice: &mut [MaybeUninit<u8>], id: u64) {
     let id_bytes = id.to_le_bytes().into_iter().cycle();
 
     for (byte, value) in slice.iter_mut().zip(id_bytes) {
@@ -82,18 +130,34 @@ unsafe fn paint(ptr: NonNull<[u8]>, id: u64) {
 }
 
 impl Block {
-    unsafe fn init(ptr: NonNull<[u8]>, layout: Layout, id: u64) -> Block {
-        unsafe { paint(ptr, id) };
-
-        Block { ptr, layout, id }
+    pub unsafe fn init(ptr: NonNull<[u8]>, layout: Layout, id: u64) -> Block {
+        let mut b = Block { ptr, layout, id };
+        unsafe { b.paint(id) };
+        b
     }
 
-    unsafe fn paint(&mut self, id: u64) {
-        unsafe { paint(self.ptr, id) };
+    pub fn as_uninit_slice(&self) -> &[MaybeUninit<u8>] {
+        // SAFETY: self is immutably borrowed, so only immutable references to
+        // the slice can exist
+        unsafe { &*slice_ptr_to_uninit_slice_mut(self.ptr) }
+    }
+
+    pub fn as_uninit_slice_mut(&mut self) -> &mut [MaybeUninit<u8>] {
+        // SAFETY: self is mutably borrowed, so no other references to the
+        // slice can exist
+        unsafe { slice_ptr_to_uninit_slice_mut(self.ptr) }
+    }
+
+    pub fn into_raw_parts(self) -> (NonNull<[u8]>, Layout) {
+        (self.ptr, self.layout)
+    }
+
+    pub unsafe fn paint(&mut self, id: u64) {
+        unsafe { paint(self.as_uninit_slice_mut(), id) };
     }
 
     // Safety: must be initialized
-    unsafe fn verify(&self) -> bool {
+    pub unsafe fn verify(&self) -> bool {
         let slice: &[u8] = unsafe { self.ptr.as_ref() };
         let id_bytes = self.id.to_le_bytes().into_iter().cycle();
 
@@ -112,9 +176,9 @@ pub struct Evaluator<S: Subject> {
 }
 
 #[derive(Clone, Debug)]
-pub struct Failed {
-    pub completed: Vec<AllocatorOp>,
-    pub failed_op: AllocatorOp,
+pub struct Failed<T: for<'a> arbitrary::Arbitrary<'a>> {
+    pub completed: Vec<AllocatorOp<T>>,
+    pub failed_op: AllocatorOp<T>,
 }
 
 impl<S: Subject> Evaluator<S> {
@@ -122,11 +186,15 @@ impl<S: Subject> Evaluator<S> {
         Evaluator { subject }
     }
 
-    pub fn evaluate(&mut self, ops: impl IntoIterator<Item = AllocatorOp>) -> Result<(), Failed> {
+    pub fn evaluate<I>(&mut self, ops: I) -> Result<(), Failed<S::Op>>
+    where
+        I: for<'a> IntoIterator<Item = AllocatorOp<S::Op>>,
+    {
         let mut completed = Vec::new();
-        let mut blocks = Vec::new();
+        let mut blocks = Blocks::new();
 
         for (op_id, op) in ops.into_iter().enumerate() {
+            let op_id: u64 = op_id.try_into().unwrap();
             match op {
                 AllocatorOp::Alloc(layout) => {
                     let ptr = match self.subject.allocate(layout) {
@@ -134,18 +202,16 @@ impl<S: Subject> Evaluator<S> {
                         Err(_) => continue,
                     };
 
-                    let id: u64 = op_id.try_into().unwrap();
-                    let block = unsafe { Block::init(ptr, layout, id) };
+                    let block = unsafe { Block::init(ptr, layout, op_id) };
                     blocks.push(block);
                 }
 
                 AllocatorOp::Dealloc(raw_idx) => {
-                    if blocks.is_empty() {
-                        continue;
-                    }
+                    let mut block = match blocks.remove_modulo(raw_idx) {
+                        Some(b) => b,
+                        None => continue,
+                    };
 
-                    let idx = raw_idx % blocks.len();
-                    let mut block = blocks.swap_remove(idx);
                     if unsafe { !block.verify() } {
                         return Err(Failed {
                             completed,
@@ -153,15 +219,21 @@ impl<S: Subject> Evaluator<S> {
                         });
                     }
 
-                    let id: u64 = op_id.try_into().unwrap();
                     unsafe {
-                        block.paint(id);
+                        block.paint(op_id);
                         self.subject.deallocate(block.ptr.cast(), block.layout);
                     }
                 }
+
+                AllocatorOp::Custom(_) => todo!(),
             }
 
             completed.push(op);
+        }
+
+        for block in blocks {
+            // TODO: verify these blocks
+            unsafe { self.subject.deallocate(block.ptr.cast(), block.layout) };
         }
 
         Ok(())
