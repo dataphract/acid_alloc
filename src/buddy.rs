@@ -837,6 +837,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> RawBuddy<BLK_SIZE, LEVELS> {
         }
     }
 
+    #[cfg(any(feature = "unstable", feature = "alloc", test))]
     unsafe fn try_new_with_offset_gaps<I>(
         metadata: NonNull<u8>,
         base: NonNull<u8>,
