@@ -33,3 +33,9 @@ name = "buddy_discontiguous"
 path = "fuzz_targets/buddy_discontiguous.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "slab"
+path = "fuzz_targets/slab.rs"
+test = false
+doc = false

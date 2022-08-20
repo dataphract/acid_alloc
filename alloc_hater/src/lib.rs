@@ -32,24 +32,21 @@ impl arbitrary::Arbitrary<'_> for ArbLayout {
 enum AllocatorOpTag {
     Alloc,
     Dealloc,
-    Custom,
 }
 
 #[derive(Clone, Debug)]
-pub enum AllocatorOp<T: for<'a> arbitrary::Arbitrary<'a>> {
+pub enum AllocatorOp {
     Alloc(Layout),
     Dealloc(usize),
-    Custom(T),
 }
 
-impl<T: for<'a> arbitrary::Arbitrary<'a>> arbitrary::Arbitrary<'_> for AllocatorOp<T> {
+impl arbitrary::Arbitrary<'_> for AllocatorOp {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let tag = AllocatorOpTag::arbitrary(u)?;
 
         let op = match tag {
             AllocatorOpTag::Alloc => AllocatorOp::Alloc(ArbLayout::arbitrary(u)?.0),
             AllocatorOpTag::Dealloc => AllocatorOp::Dealloc(usize::arbitrary(u)?),
-            AllocatorOpTag::Custom => AllocatorOp::Custom(T::arbitrary(u)?),
         };
 
         Ok(op)
@@ -190,9 +187,9 @@ pub struct Evaluator<S: Subject> {
 }
 
 #[derive(Clone, Debug)]
-pub struct Failed<T: for<'a> arbitrary::Arbitrary<'a>> {
-    pub completed: Vec<AllocatorOp<T>>,
-    pub failed_op: AllocatorOp<T>,
+pub struct Failed {
+    pub completed: Vec<AllocatorOp>,
+    pub failed_op: AllocatorOp,
 }
 
 impl<S: Subject> Evaluator<S> {
@@ -200,9 +197,9 @@ impl<S: Subject> Evaluator<S> {
         Evaluator { subject }
     }
 
-    pub fn evaluate<I>(&mut self, ops: I) -> Result<(), Failed<S::Op>>
+    pub fn evaluate<I>(&mut self, ops: I) -> Result<(), Failed>
     where
-        I: for<'a> IntoIterator<Item = AllocatorOp<S::Op>>,
+        I: for<'a> IntoIterator<Item = AllocatorOp>,
     {
         let mut completed = Vec::new();
         let mut blocks = Blocks::new();
@@ -238,8 +235,6 @@ impl<S: Subject> Evaluator<S> {
                         self.subject.deallocate(block.ptr.cast(), block.layout);
                     }
                 }
-
-                AllocatorOp::Custom(_) => todo!(),
             }
 
             completed.push(op);
