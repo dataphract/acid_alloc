@@ -147,8 +147,8 @@ impl BuddyLevel {
     /// # Safety
     ///
     /// The caller must uphold the following invariants:
-    /// - The memory at `block` must be within the provenance of `base` and
-    ///   valid for reads and writes for `size_of::<BlockLink>()` bytes.
+    /// - The memory at `block` must be within the provenance of `base` and valid for reads and
+    ///   writes for `size_of::<BlockLink>()` bytes.
     /// - `block` must be the address of an element of `self.free_list`.
     unsafe fn free_list_remove(&mut self, base: BasePtr, block: NonZeroUsize) {
         unsafe {
@@ -231,8 +231,7 @@ impl BuddyLevel {
 
 /// A binary-buddy allocator.
 ///
-/// For a discussion of the buddy algorithm, see the [module-level
-/// documentation].
+/// For a discussion of the buddy algorithm, see the [module-level documentation].
 ///
 /// # Configuration
 ///
@@ -241,51 +240,86 @@ impl BuddyLevel {
 /// - `LEVELS` is the number of levels in the allocator.
 ///
 /// Each constructor also takes one runtime parameter:
-/// - `num_blocks` is the number of top-level blocks of `BLK_SIZE` bytes managed
-///   by the allocator.
+/// - `num_blocks` is the number of top-level blocks of `BLK_SIZE` bytes managed by the allocator.
 ///
 /// These parameters are subject to the following invariants:
 /// - `BLK_SIZE` must be a power of two.
 /// - `LEVELS` must be nonzero and less than `usize::BITS`.
-/// - The minumum block size must be at least `2 * mem::size_of<usize>()`;  it
-///   can be calculated with the formula `BLK_SIZE >> (LEVELS - 1)`.
-/// - The total size in bytes of the managed region must be less than
-///   `usize::MAX`.
+/// - The minumum block size must be at least `2 * mem::size_of<usize>()`; it can be calculated with
+///   the formula `BLK_SIZE >> (LEVELS - 1)`.
+/// - The total size in bytes of the managed region must be less than `usize::MAX`.
 ///
 /// Attempting to construct a `Buddy` whose const parameters violate
 /// these invariants will result in an error.
 ///
-/// # Gaps
+/// # Unpopulated initialization
 ///
-/// A `Buddy` can be configured to leave certain ranges of the managed region
-/// untouched. Such regions are never written to or read from by the allocator.
+/// A `Buddy` can be initialized for a region of memory without immediately allowing it to access
+/// any of that memory using the [`Buddy::new_raw_unpopulated`] constructor. Memory in that region
+/// can then be added to the allocator over time.
 ///
-/// For example, consider a 16 KiB region of physical memory in which the region
-/// between 4-8 KiB is reserved for memory-mapped I/O.
+/// This is particularly useful when using a `Buddy` to allocate discontiguous regions of physical
+/// memory. For example, consider a 16 KiB region of physical memory in which the region between 4-8
+/// KiB is reserved by the platform for memory-mapped I/O.
 ///
 /// ```text
-///   | RAM            | I/O            | RAM            | RAM            |
-/// 0x0000           0x1000           0x2000            0x3000          0x4000
+///       | RAM              | MMIO             | RAM               | RAM             |
+///   0x##0000           0x##1000           0x##2000            0x##3000          0x##4000
 /// ```
 ///
-/// By initializing a `Buddy` with a gap of `0x1000..0x2000`, the I/O region is
-/// safely excluded from allocation.
+/// Initializing an allocator normally for the entire region would result in writes to the MMIO
+/// region, with unpredictable consequences.
 ///
 /// ```no_run
-/// # use core::num::NonZeroUsize;
-/// # use acid_alloc::{Buddy, Raw};
-/// # let metadata = unimplemented!();
-/// # let region = unimplemented!();
-/// let gap_start = NonZeroUsize::new(0x1000).unwrap();
-/// let gap_end = NonZeroUsize::new(0x2000).unwrap();
-/// let alloc: Buddy<16384, 3, Raw> = unsafe {
-///     Buddy::new_raw_with_address_gaps(metadata, region, 1, [gap_start..gap_end]).unwrap()
-/// };
+/// // These values result in a minimum block size of 4096.
+/// type Buddy = acid_alloc::Buddy<16384, 3, acid_alloc::Raw>;
+///
+/// # fn main() {
+/// # /*
+/// let region = /* ... */;
+/// let metadata = /* ... */;
+/// # */
+/// # let region: core::ptr::NonNull<u8> = unimplemented!();
+/// # let metadata: core::ptr::NonNull<u8> = unimplemented!();
+///
+/// // ⚠ Bad Things occur!
+/// let buddy = unsafe { Buddy::new_raw(region, metadata, 1).unwrap() };
+/// # }
 /// ```
 ///
-/// ```text
-///   | Free           | Unavailable    | Free                            |
-/// 0x0000           0x1000           0x2000            0x3000          0x4000
+/// However, creating the allocator using `new_raw_unpopulated()` does not issue any writes.
+/// Instead, valid subregions can be added to the allocator explicitly.
+///
+/// ```no_run
+/// # use core::{alloc::Layout, num::NonZeroUsize};
+/// # const BLK_SIZE: usize = 16384;
+/// # const LEVELS: usize = 3;
+/// # type Buddy = acid_alloc::Buddy<BLK_SIZE, LEVELS, acid_alloc::Raw>;
+/// # fn main() {
+/// # let region: core::ptr::NonNull<u8> = unimplemented!();
+/// # let metadata: core::ptr::NonNull<u8> = unimplemented!();
+/// // Define the usable regions of memory.
+/// let low_start = NonZeroUsize::new(region.as_ptr() as usize).unwrap();
+/// let low_end = NonZeroUsize::new(low_start.get() + 4096).unwrap();
+/// let high_start = NonZeroUsize::new(low_start.get() + 8192).unwrap();
+/// let high_end = NonZeroUsize::new(low_start.get() + 16384).unwrap();
+///
+/// unsafe {
+///     // No accesses to `region` are made during this call.
+///     let mut buddy = Buddy::new_raw_unpopulated(region, metadata, 1).unwrap();
+///
+///     // The allocator has no memory yet, so it can't make allocations.
+///     assert!(buddy.allocate(Layout::new::<[u8; 4096]>()).is_err());
+///
+///     // Add the valid regions to the allocator.
+///     buddy.add_region(low_start..low_end);
+///     buddy.add_region(high_start..high_end);
+///
+///     // Now allocations succeed.
+///     let block = buddy.allocate(Layout::new::<[u8; 4096]>()).unwrap();
+/// }
+///
+/// # }
 /// ```
 ///
 /// # Example
@@ -351,13 +385,12 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> Buddy<BLK_SIZE, LEVELS, Raw> {
     /// # Safety
     ///
     /// The caller must uphold the following invariants:
-    /// - `region` must be a pointer to a region that satisfies the [`Layout`]
-    ///   returned by [`Self::region_layout(num_blocks)`], and it must be valid
-    ///   for reads and writes for the entire size indicated by that `Layout`.
-    /// - `metadata` must be a pointer to a region that satisfies the [`Layout`]
-    ///   returned by [`Self::metadata_layout(num_blocks)`], and it must be
-    ///   valid for reads and writes for the entire size indicated by that
-    ///   `Layout`.
+    /// - `region` must be a pointer to a region that satisfies the [`Layout`] returned by
+    ///   [`Self::region_layout(num_blocks)`], and it must be valid for reads and writes for the
+    ///   entire size indicated by that `Layout`.
+    /// - `metadata` must be a pointer to a region that satisfies the [`Layout`] returned by
+    ///   [`Self::metadata_layout(num_blocks)`], and it must be valid for reads and writes for the
+    ///   entire size indicated by that `Layout`.
     ///
     ///  # Errors
     ///
@@ -372,19 +405,21 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> Buddy<BLK_SIZE, LEVELS, Raw> {
         region: NonNull<u8>,
         num_blocks: usize,
     ) -> Result<Buddy<BLK_SIZE, LEVELS, Raw>, AllocInitError> {
-        unsafe { Self::new_raw_with_address_gaps(metadata, region, num_blocks, iter::empty()) }
+        unsafe {
+            RawBuddy::try_new_with_address_gaps(metadata, region, num_blocks, iter::empty())
+                .map(|p| p.with_backing_allocator(Raw))
+        }
     }
 
     /// Constructs a new `Buddy` from raw pointers without populating it.
     ///
     /// # Safety
     ///
-    /// - `region` must be a pointer to a region that satisfies the [`Layout`]
-    ///   returned by [`Self::region_layout(num_blocks)`].
-    /// - `metadata` must be a pointer to a region that satisfies the [`Layout`]
-    ///   returned by [`Self::metadata_layout(num_blocks)`], and it must be
-    ///   valid for reads and writes for the entire size indicated by that
-    ///   `Layout`.
+    /// - `region` must be a pointer to a region that satisfies the [`Layout`] returned by
+    ///   [`Self::region_layout(num_blocks)`].
+    /// - `metadata` must be a pointer to a region that satisfies the [`Layout`] returned by
+    ///   [`Self::metadata_layout(num_blocks)`], and it must be valid for reads and writes for the
+    ///   entire size indicated by that `Layout`.
     ///
     /// [`Self::region_layout(num_blocks)`]: Self::region_layout
     /// [`Self::metadata_layout(num_blocks)`]: Self::metadata_layout
@@ -395,7 +430,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> Buddy<BLK_SIZE, LEVELS, Raw> {
         num_blocks: usize,
     ) -> Result<Buddy<BLK_SIZE, LEVELS, Raw>, AllocInitError> {
         unsafe {
-            RawBuddy::<BLK_SIZE, LEVELS>::try_new_unpopulated(metadata, region, num_blocks)
+            RawBuddy::try_new_unpopulated(metadata, region, num_blocks)
                 .map(|p| p.with_backing_allocator(Raw))
         }
     }
@@ -408,84 +443,6 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> Buddy<BLK_SIZE, LEVELS, Raw> {
     /// allocator.
     pub unsafe fn add_region(&mut self, addr_range: Range<NonZeroUsize>) {
         unsafe { self.raw.add_region(addr_range) };
-    }
-
-    /// Constructs a new `Buddy` from raw pointers, with gaps specified by
-    /// offset ranges.
-    ///
-    /// # Safety
-    ///
-    /// The caller must uphold the following invariants:
-    /// - `region` must be a pointer to a region that satisfies the [`Layout`]
-    ///   returned by [`Self::region_layout(num_blocks)`], and it must be valid
-    ///   for reads and writes for the entire size indicated by that `Layout`.
-    /// - `metadata` must be a pointer to a region that satisfies the [`Layout`]
-    ///   returned by [`Self::metadata_layout(num_blocks)`], and it must be
-    ///   valid for reads and writes for the entire size indicated by that
-    ///   `Layout`.
-    ///
-    ///  # Errors
-    ///
-    ///  This constructor returns an error if the allocator configuration is
-    ///  invalid.
-    ///
-    /// [`Self::region_layout(num_blocks)`]: Self::region_layout
-    /// [`Self::metadata_layout(num_blocks)`]: Self::metadata_layout
-    /// [`Layout`]: core::alloc::Layout
-    pub unsafe fn new_raw_with_offset_gaps<I>(
-        metadata: NonNull<u8>,
-        region: NonNull<u8>,
-        num_blocks: usize,
-        gaps: I,
-    ) -> Result<Buddy<BLK_SIZE, LEVELS, Raw>, AllocInitError>
-    where
-        I: IntoIterator<Item = Range<usize>>,
-    {
-        unsafe {
-            RawBuddy::<BLK_SIZE, LEVELS>::try_new_with_offset_gaps(
-                metadata, region, num_blocks, gaps,
-            )
-            .map(|p| p.with_backing_allocator(Raw))
-        }
-    }
-
-    /// Constructs a new `Buddy` from raw pointers, with gaps specified by
-    /// address ranges.
-    ///
-    /// # Safety
-    ///
-    /// The caller must uphold the following invariants:
-    /// - `region` must be a pointer to a region that satisfies the [`Layout`]
-    ///   returned by [`Self::region_layout(num_blocks)`], and it must be valid
-    ///   for reads and writes for the entire size indicated by that `Layout`.
-    /// - `metadata` must be a pointer to a region that satisfies the [`Layout`]
-    ///   returned by [`Self::metadata_layout(num_blocks)`], and it must be
-    ///   valid for reads and writes for the entire size indicated by that
-    ///   `Layout`.
-    ///
-    ///  # Errors
-    ///
-    ///  This constructor returns an error if the allocator configuration is
-    ///  invalid.
-    ///
-    /// [`Self::region_layout(num_blocks)`]: Self::region_layout
-    /// [`Self::metadata_layout(num_blocks)`]: Self::metadata_layout
-    /// [`Layout`]: core::alloc::Layout
-    pub unsafe fn new_raw_with_address_gaps<I>(
-        metadata: NonNull<u8>,
-        region: NonNull<u8>,
-        num_blocks: usize,
-        gaps: I,
-    ) -> Result<Buddy<BLK_SIZE, LEVELS, Raw>, AllocInitError>
-    where
-        I: IntoIterator<Item = Range<NonZeroUsize>>,
-    {
-        unsafe {
-            RawBuddy::<BLK_SIZE, LEVELS>::try_new_with_address_gaps(
-                metadata, region, num_blocks, gaps,
-            )
-            .map(|p| p.with_backing_allocator(Raw))
-        }
     }
 
     /// Decomposes the allocator into its raw parts.
@@ -528,6 +485,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> Buddy<BLK_SIZE, LEVELS, Global>
     /// # Errors
     ///
     /// If allocation fails, returns `Err(AllocError)`.
+    #[doc(hidden)]
     pub fn try_new_with_offset_gaps<I>(
         num_blocks: usize,
         gaps: I,
@@ -592,6 +550,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> Buddy<BLK_SIZE, LEVELS, Global>
     ///
     /// If allocation fails, or if the allocator configuration is invalid,
     /// returns `Err`.
+    #[doc(hidden)]
     pub fn try_new_with_offset_gaps<I>(
         num_blocks: usize,
         gaps: I,
@@ -624,6 +583,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: Allocator> Buddy<BLK_SIZE, L
     /// # Errors
     ///
     /// If allocation fails, returns `Err(AllocError)`.
+    #[doc(hidden)]
     #[cfg_attr(docs_rs, doc(cfg(feature = "unstable")))]
     pub fn try_new_with_offset_gaps_in<I>(
         num_blocks: usize,
@@ -802,11 +762,10 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> Buddy<BLK_
     /// # Safety
     ///
     /// Calling this function cannot cause undefined behavior. However:
-    /// - Reading from the returned pointer, including upgrading it to a
-    ///   reference, is undefined behavior if there are any outstanding
-    ///   allocations.
-    /// - Writing to the returned pointer, including upgrading it to a mutable
-    ///   reference, is _always_ undefined behavior.
+    /// - Reading from the returned pointer, including upgrading it to a reference, is undefined
+    ///   behavior if there are any outstanding allocations.
+    /// - Writing to the returned pointer, including upgrading it to a mutable reference, is
+    ///   _always_ undefined behavior.
     pub fn region(&mut self) -> NonNull<[u8]> {
         self.raw.region()
     }
@@ -878,6 +837,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> RawBuddy<BLK_SIZE, LEVELS> {
         }
     }
 
+    #[cfg(any(feature = "unstable", feature = "alloc", test))]
     unsafe fn try_new_with_offset_gaps<I>(
         metadata: NonNull<u8>,
         base: NonNull<u8>,
@@ -1257,11 +1217,10 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> RawBuddy<BLK_SIZE, LEVELS> {
     /// # Safety
     ///
     /// Calling this function cannot cause undefined behavior. However:
-    /// - Reading from the returned pointer, including upgrading it to a
-    ///   reference, is undefined behavior if there are any outstanding
-    ///   allocations.
-    /// - Writing to the returned pointer, including upgrading it to a mutable
-    ///   reference, is _always_ undefined behavior.
+    /// - Reading from the returned pointer, including upgrading it to a reference, is undefined
+    ///   behavior if there are any outstanding allocations.
+    /// - Writing to the returned pointer, including upgrading it to a mutable reference, is
+    ///   _always_ undefined behavior.
     pub fn region(&mut self) -> NonNull<[u8]> {
         NonNull::new(ptr::slice_from_raw_parts_mut(
             self.base.ptr().as_ptr(),
