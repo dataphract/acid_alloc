@@ -25,6 +25,7 @@
 
 use core::{
     iter::{self, Peekable},
+    mem::ManuallyDrop,
     ops::Range,
     ptr,
 };
@@ -405,8 +406,8 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> Buddy<BLK_SIZE, LEVELS, Raw> {
     ///
     /// `range` must be a range of addresses not already managed by this
     /// allocator.
-    pub unsafe fn populate_region(&mut self, addr_range: Range<NonZeroUsize>) {
-        unsafe { self.raw.populate_region(addr_range) };
+    pub unsafe fn add_region(&mut self, addr_range: Range<NonZeroUsize>) {
+        unsafe { self.raw.add_region(addr_range) };
     }
 
     /// Constructs a new `Buddy` from raw pointers, with gaps specified by
@@ -484,6 +485,28 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> Buddy<BLK_SIZE, LEVELS, Raw> {
                 metadata, region, num_blocks, gaps,
             )
             .map(|p| p.with_backing_allocator(Raw))
+        }
+    }
+
+    /// Decomposes the allocator into its raw parts.
+    ///
+    /// # Safety
+    ///
+    /// This function must only be called if no references to outstanding
+    /// allocations exist .
+    pub unsafe fn into_raw_parts(self) -> RawBuddyParts {
+        let metadata = self.raw.metadata;
+        let metadata_layout = Self::metadata_layout(self.raw.num_blocks.get()).unwrap();
+        let region = self.raw.base.ptr();
+        let region_layout = Self::region_layout(self.raw.num_blocks.get()).unwrap();
+
+        let _ = ManuallyDrop::new(self);
+
+        RawBuddyParts {
+            metadata,
+            metadata_layout,
+            region,
+            region_layout,
         }
     }
 }
@@ -646,7 +669,8 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: Allocator> Buddy<BLK_SIZE, L
 }
 
 impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> Buddy<BLK_SIZE, LEVELS, A> {
-    const fn min_block_size() -> Result<usize, AllocInitError> {
+    /// Returns the smallest block size that can be allocated by an allocator of this type.
+    pub const fn min_block_size() -> Result<usize, AllocInitError> {
         if LEVELS == 0 || !BLK_SIZE.is_power_of_two() || LEVELS >= usize::BITS as usize {
             return Err(AllocInitError::InvalidConfig);
         }
@@ -818,6 +842,19 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> Drop
     }
 }
 
+/// The raw parts of a `Buddy`.
+#[derive(Debug)]
+pub struct RawBuddyParts {
+    /// A pointer to the metadata region.
+    pub metadata: NonNull<u8>,
+    /// The layout of the metadata region.
+    pub metadata_layout: Layout,
+    /// A pointer to the managed region.
+    pub region: NonNull<u8>,
+    /// The layout of the managed region.
+    pub region_layout: Layout,
+}
+
 /// Like a `Buddy`, but without a `Drop` impl or an associated
 /// allocator.
 ///
@@ -882,17 +919,17 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> RawBuddy<BLK_SIZE, LEVELS> {
         let mut start = buddy.base.addr();
         for gap in gaps {
             let end = gap.start;
-            unsafe { buddy.populate_region(start..end) };
+            unsafe { buddy.add_region(start..end) };
             start = gap.end;
         }
         let end = buddy.base.limit();
 
-        unsafe { buddy.populate_region(start..end) };
+        unsafe { buddy.add_region(start..end) };
 
         Ok(buddy)
     }
 
-    unsafe fn populate_region(&mut self, addr_range: Range<NonZeroUsize>) {
+    unsafe fn add_region(&mut self, addr_range: Range<NonZeroUsize>) {
         // Make sure the region can be managed by this allocator.
         assert!(self.base.addr() <= addr_range.start);
         assert!(addr_range.end <= self.base.limit());
@@ -1648,7 +1685,7 @@ mod tests {
     }
 
     #[test]
-    fn populate_coalesce() {
+    fn add_coalesce() {
         const BLK_SIZE: usize = 128;
         const LEVELS: usize = 2;
         type Alloc = Buddy<BLK_SIZE, LEVELS, Raw>;
@@ -1680,14 +1717,14 @@ mod tests {
         buddy.allocate(half_layout).unwrap_err();
 
         // Populate the left block.
-        unsafe { buddy.populate_region(left) };
+        unsafe { buddy.add_region(left) };
 
         // Now that the left half is populated, allocation should succeed.
         let left_blk = buddy.allocate(half_layout).unwrap();
         unsafe { buddy.deallocate(left_blk.cast()) };
 
         // Populate the right block. This should cause the blocks to coalesce.
-        unsafe { buddy.populate_region(right) };
+        unsafe { buddy.add_region(right) };
 
         // Since both halves have been populated and coalesced, this should succeed.
         let full_blk = buddy.allocate(full_layout).unwrap();
