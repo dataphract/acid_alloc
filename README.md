@@ -4,7 +4,7 @@
 
 This crate provides allocators that can function without the backing of another
 allocator. This makes them suitable for use on bare metal or with OS allocation
-facilities like `memmap(2)`/`brk(2)`.
+facilities like `mmap(2)`/`brk(2)`.
 
 The following allocator types are available:
 
