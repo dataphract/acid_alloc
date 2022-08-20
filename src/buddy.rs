@@ -669,6 +669,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: Allocator> Buddy<BLK_SIZE, L
 }
 
 impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> Buddy<BLK_SIZE, LEVELS, A> {
+    /// Returns the smallest block size that can be allocated by an allocator of this type.
     pub const fn min_block_size() -> Result<usize, AllocInitError> {
         if LEVELS == 0 || !BLK_SIZE.is_power_of_two() || LEVELS >= usize::BITS as usize {
             return Err(AllocInitError::InvalidConfig);

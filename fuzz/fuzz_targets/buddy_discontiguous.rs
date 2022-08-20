@@ -141,13 +141,11 @@ fuzz_target!(|args: Args<BLK_SIZE, LEVELS>| {
                     None => continue,
                 };
 
-                unsafe {
-                    if !block.verify() {
-                        panic!("\nblock failed verification.\nnum blocks: {num_blocks}\ncompleted: {completed:?}\nfailed: {op:?}");
-                    }
-
-                    block.paint(op_id);
+                if !block.verify() {
+                    panic!("\nblock failed verification.\nnum blocks: {num_blocks}\ncompleted: {completed:?}\nfailed: {op:?}");
                 }
+
+                unsafe { block.paint(op_id) };
 
                 let (ptr, layout) = block.into_raw_parts();
                 unsafe { buddy.deallocate(ptr.cast()) };

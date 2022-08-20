@@ -78,6 +78,7 @@ pub trait Subject {
 }
 
 /// A list of allocated blocks.
+#[derive(Default)]
 pub struct Blocks {
     blocks: Vec<Block>,
 }
@@ -130,18 +131,30 @@ unsafe fn paint(slice: &mut [MaybeUninit<u8>], id: u64) {
 }
 
 impl Block {
+    /// Creates a block from `ptr` and paints it according to `id`.
+    ///
+    /// # Safety
+    ///
+    /// The caller must uphold the following invariants:
+    /// - `ptr` must be valid for reads and writes for `ptr.len()` bytes.
+    /// - `ptr` must have been allocated according to `layout`.
+    /// - No references to the memory at `ptr` may exist when this function is called.
+    /// - No accesses to the memory at `ptr` may be made except by way of the returned `Block` said
+    ///  `Block` is dropped.
     pub unsafe fn init(ptr: NonNull<[u8]>, layout: Layout, id: u64) -> Block {
         let mut b = Block { ptr, layout, id };
-        unsafe { b.paint(id) };
+        b.paint(id);
         b
     }
 
+    /// Returns the `Block`'s memory as a slice of uninitialized bytes.
     pub fn as_uninit_slice(&self) -> &[MaybeUninit<u8>] {
         // SAFETY: self is immutably borrowed, so only immutable references to
         // the slice can exist
         unsafe { &*slice_ptr_to_uninit_slice_mut(self.ptr) }
     }
 
+    /// Returns the `Block`'s memory as a mutable slice of uninitialized bytes.
     pub fn as_uninit_slice_mut(&mut self) -> &mut [MaybeUninit<u8>] {
         // SAFETY: self is mutably borrowed, so no other references to the
         // slice can exist
@@ -152,12 +165,13 @@ impl Block {
         (self.ptr, self.layout)
     }
 
-    pub unsafe fn paint(&mut self, id: u64) {
+    /// "Paints" the memory contained by `self` with the value of `id`.
+    pub fn paint(&mut self, id: u64) {
         unsafe { paint(self.as_uninit_slice_mut(), id) };
     }
 
-    // Safety: must be initialized
-    pub unsafe fn verify(&self) -> bool {
+    /// Verifies that the memory contained by `self` has not been overwritten.
+    pub fn verify(&self) -> bool {
         let slice: &[u8] = unsafe { self.ptr.as_ref() };
         let id_bytes = self.id.to_le_bytes().into_iter().cycle();
 
@@ -212,7 +226,7 @@ impl<S: Subject> Evaluator<S> {
                         None => continue,
                     };
 
-                    if unsafe { !block.verify() } {
+                    if !block.verify() {
                         return Err(Failed {
                             completed,
                             failed_op: op,
