@@ -2,9 +2,9 @@
 //!
 //! ---
 //!
-//! This crate provides allocators that can function without the backing of another
-//! allocator. This makes them suitable for use on bare metal or with OS allocation
-//! facilities like `mmap(2)`/`brk(2)`.
+//! This crate provides allocators that can function without the backing of another allocator. This
+//! makes them suitable for use on bare metal or with OS allocation facilities like
+//! `mmap(2)`/`brk(2)`.
 //!
 //! ## Allocators
 //!
@@ -20,8 +20,8 @@
 //! ## Features
 //!
 //! All allocators provided by this crate are available in a `#![no_std]`,
-//! `#![cfg(no_global_oom_handling)]` environment. Additional functionality is
-//! available when enabling feature flags:
+//! `#![cfg(no_global_oom_handling)]` environment. Additional functionality is available when
+//! enabling feature flags:
 //!
 //! <table>
 //!  <tr>
@@ -69,8 +69,8 @@
 #![cfg_attr(feature = "unstable", feature(int_log))]
 #![cfg_attr(feature = "unstable", feature(strict_provenance))]
 #![cfg_attr(docs_rs, feature(doc_cfg))]
-// This is necessary to allow `sptr` and `crate::core` to shadow methods
-// provided by unstable features.
+// This is necessary to allow `sptr` and `crate::core` to shadow methods provided by unstable
+// features.
 #![allow(unstable_name_collisions)]
 
 #[cfg(test)]
@@ -128,10 +128,8 @@ requires_sptr_or_unstable! {
 
     #[cfg(not(feature = "unstable"))]
     pub(crate) fn layout_error() -> LayoutError {
-        // HACK: LayoutError is #[non_exhaustive], so it can't be
-        // constructed outside the standard library. As a workaround,
-        // deliberately pass bad values to the constructor to get one.
-
+        // HACK: LayoutError is #[non_exhaustive], so it can't be constructed outside the standard
+        // library. As a workaround, deliberately pass bad values to the constructor to get one.
         Layout::from_size_align(0, 0).unwrap_err()
     }
 
@@ -140,38 +138,35 @@ requires_sptr_or_unstable! {
     pub enum AllocInitError {
         /// A necessary allocation failed.
         ///
-        /// This variant is returned when a constructor attempts to allocate
-        /// memory, either for metadata or the managed region, but the
-        /// underlying allocator fails.
+        /// This variant is returned when a constructor attempts to allocate memory, either for
+        /// metadata or the managed region, but the underlying allocator fails.
         ///
         /// The variant contains the [`Layout`] that could not be allocated.
         AllocFailed(Layout),
 
         /// The configuration of the allocator is invalid.
         ///
-        /// This variant is returned when an allocator's configuration
-        /// parameters are impossible to satisfy.
+        /// This variant is returned when an allocator's configuration parameters are impossible to
+        /// satisfy.
         InvalidConfig,
 
         /// The location of the allocator is invalid.
         ///
-        /// This variant is returned when the full size of the managed region
-        /// would not fit at the provided address, i.e., pointer calculations
-        /// would overflow.
+        /// This variant is returned when the full size of the managed region would not fit at the
+        /// provided address, i.e., pointer calculations would overflow.
         InvalidLocation,
     }
 
     /// Types which provide memory which backs an allocator.
     ///
     /// This is a supertrait of [`Allocator`], and is implemented by the following types:
-    /// - The `Raw` marker type indicates that an allocator is not backed by another
-    ///   allocator. This is the case when constructing the allocator from raw
-    ///   pointers. Memory used by this allocator can be reclaimed using
-    ///   `.into_raw_parts()`.
-    /// - The `Global` marker type indicates that an allocator is backed by the
-    ///   global allocator. The allocator will free its memory on drop.
-    /// - Any type `A` which implements [`Allocator`] indicates that an allocator is
-    ///   backed by an instance of `A`. The allocator will free its memory on drop.
+    /// - The `Raw` marker type indicates that an allocator is not backed by another allocator. This
+    ///   is the case when constructing the allocator from raw pointers. Memory used by this
+    ///   allocator can be reclaimed using `.into_raw_parts()`.
+    /// - The `Global` marker type indicates that an allocator is backed by the global allocator.
+    ///   The allocator will free its memory on drop.
+    /// - Any type `A` which implements [`Allocator`] indicates that an allocator is backed by an
+    ///   instance of `A`. The allocator will free its memory on drop.
     ///
     /// [`Allocator`]: https://doc.rust-lang.org/stable/core/alloc/trait.Allocator.html
     pub trait BackingAllocator: Sealed {

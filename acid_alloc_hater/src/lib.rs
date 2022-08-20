@@ -1,8 +1,8 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
-use std::{alloc::Layout, mem::ManuallyDrop, ops::Range, ptr::NonNull};
+use std::{alloc::Layout, ops::Range, ptr::NonNull};
 
-use acid_alloc::{AllocInitError, Buddy, Global, Raw};
+use acid_alloc::{AllocInitError, Buddy, Global, Slab};
 use alloc_hater::Subject;
 
 pub struct BuddySubject<const BLK_SIZE: usize, const LEVELS: usize>(
@@ -39,36 +39,26 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> Subject for BuddySubject<BLK_SI
     fn handle_custom_op(&mut self, (): ()) {}
 }
 
-pub struct RawBuddySubject<const BLK_SIZE: usize, const LEVELS: usize>(
-    ManuallyDrop<Buddy<BLK_SIZE, LEVELS, Raw>>,
-);
+pub struct SlabSubject(Slab<Global>);
 
-impl<const BLK_SIZE: usize, const LEVELS: usize> RawBuddySubject<BLK_SIZE, LEVELS> {
-    pub fn new_unpopulated(num_blocks: usize) -> Result<Self, AllocInitError> {
-        let metadata_layout = Buddy::<BLK_SIZE, LEVELS, Raw>::metadata_layout(num_blocks)?;
-        let region_layout = Buddy::<BLK_SIZE, LEVELS, Raw>::region_layout(num_blocks)?;
-
-        let metadata = NonNull::new(unsafe { std::alloc::alloc(metadata_layout) })
-            .ok_or(AllocInitError::AllocFailed(metadata_layout))?;
-        let region =
-            NonNull::new(unsafe { std::alloc::alloc(region_layout) }).ok_or_else(|| {
-                unsafe { std::alloc::dealloc(metadata.as_ptr(), metadata_layout) };
-                AllocInitError::AllocFailed(region_layout)
-            })?;
-
-        let buddy = unsafe { Buddy::new_raw_unpopulated(metadata, region, num_blocks) }?;
-
-        Ok(RawBuddySubject(ManuallyDrop::new(buddy)))
+impl SlabSubject {
+    pub fn new(block_size: usize, num_blocks: usize) -> Result<Self, AllocInitError> {
+        let s = Slab::try_new(block_size, num_blocks)?;
+        Ok(SlabSubject(s))
     }
 }
 
-impl<const BLK_SIZE: usize, const LEVELS: usize> Drop for RawBuddySubject<BLK_SIZE, LEVELS> {
-    fn drop(&mut self) {
-        unsafe {
-            let raw = ManuallyDrop::take(&mut self.0);
-            let parts = raw.into_raw_parts();
-            std::alloc::dealloc(parts.metadata.as_ptr(), parts.metadata_layout);
-            std::alloc::dealloc(parts.region.as_ptr(), parts.region_layout);
-        }
+impl Subject for SlabSubject {
+    type Op = ();
+    type AllocError = acid_alloc::AllocError;
+
+    fn allocate(&mut self, layout: Layout) -> Result<NonNull<[u8]>, Self::AllocError> {
+        self.0.allocate(layout)
     }
+
+    unsafe fn deallocate(&mut self, ptr: NonNull<u8>, _layout: std::alloc::Layout) {
+        unsafe { self.0.deallocate(ptr) };
+    }
+
+    fn handle_custom_op(&mut self, (): ()) {}
 }
