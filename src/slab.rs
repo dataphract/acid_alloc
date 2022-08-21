@@ -20,8 +20,6 @@
 //! difference between the average allocation size and the allocator's block
 //! size.
 
-use core::ptr;
-
 use crate::core::{
     alloc::{AllocError, Layout},
     fmt, mem,
@@ -50,13 +48,20 @@ use crate::{AllocInitError, BackingAllocator, BasePtr, BlockLink, Raw};
 ///
 /// # Configuration
 ///
-/// Each constructor takes two parameters:
+/// Each constructor takes the following parameters:
 /// - `block_size` is the size in bytes of each allocation.
-/// - `num_blocks` is the maximum number of allocations that a `Slab` may make
-///   at once.
+/// - `num_blocks` is the maximum number of allocations that a `Slab` may make at once.
 ///
-/// The minimum alignment of each allocated block is determined by
-/// `block_size.trailing_zeros()`.
+/// Blocks are packed as tightly as possible. As such, the minimum guaranteed alignment of a block
+/// is
+///
+/// ```text
+/// 1 << block_size.trailing_zeros()
+/// ```
+///
+/// If a higher guaranteed alignment is required, the block size must be rounded up to the proper
+/// alignment when creating the allocator. Calls to [`Slab::allocate`] with a `Layout` alignment
+/// greater than the minimum guaranteed alignment will result in an error.
 ///
 /// [module-level documentation]: crate::slab
 pub struct Slab<A: BackingAllocator> {
@@ -77,15 +82,18 @@ impl Slab<Raw> {
     ///
     /// # Errors
     ///
-    /// Returns an error if the `Layout` indicated by
-    /// [`Self::region_layout()`][0] would not fit between `region` and the end
-    /// of the address space.
+    /// Returns an error if the `Layout` indicated by [`Self::region_layout()`][0] would not fit
+    /// between `region` and the end of the address space.
     ///
     /// # Safety
     ///
-    /// `region` must be a pointer to a region that fits the [`Layout`] returned
-    /// by [`Self::region_layout()`][0], and it must be valid for reads and
-    /// writes for the entire size indicated by that `Layout`.
+    /// The caller must uphold the following invariants:
+    /// - `region` must be a pointer to a region that fits the [`Layout`] returned by
+    ///   [`Self::region_layout()`][0], and it must be valid for reads and writes for the entire
+    ///   size indicated by that `Layout`.
+    /// - No references to the memory at `region` may exist when this function is called.
+    /// - As long as the returned `Slab` exists, no accesses may be made to the memory at `region`
+    ///   except by methods on the returned `Slab`.
     ///
     /// [module-level documentation]: crate::slab
     /// [0]: Slab::region_layout
@@ -104,14 +112,12 @@ impl Slab<Raw> {
 impl Slab<Global> {
     /// Attempts to construct a new `Slab` backed by the global allocator.
     ///
-    /// In particular, the memory managed by this `Slab` is allocated from the
-    /// global allocator according to the layout indicated by
-    /// [`Self::region_layout(block_size, num_blocks)`][0].
+    /// The memory managed by this `Slab` is allocated from the global allocator according to the
+    /// layout indicated by [`Slab::region_layout(block_size, num_blocks)`][0].
     ///
     /// # Errors
     ///
-    /// Returns an error if sufficient memory could not be allocated from the
-    /// global allocator.
+    /// Returns an error if sufficient memory could not be allocated from the global allocator.
     ///
     /// [0]: Slab::region_layout
     #[cfg_attr(docs_rs, doc(cfg(feature = "alloc")))]
@@ -149,14 +155,12 @@ impl Slab<Global> {
 impl Slab<Global> {
     /// Attempts to construct a new `Slab` backed by the global allocator.
     ///
-    /// In particular, the memory managed by this `Slab` is allocated from the
-    /// global allocator according to the layout indicated by
-    /// [`Self::region_layout(block_size, num_blocks)`][0].
+    /// The memory managed by this `Slab` is allocated from the global allocator according to the
+    /// layout indicated by [`Slab::region_layout(block_size, num_blocks)`][0].
     ///
     /// # Errors
     ///
-    /// Returns an error if sufficient memory could not be allocated from the
-    /// global allocator.
+    /// Returns an error if sufficient memory could not be allocated from the global allocator.
     ///
     /// [0]: Slab::region_layout
     #[cfg_attr(docs_rs, doc(cfg(feature = "alloc")))]
@@ -172,14 +176,12 @@ where
 {
     /// Attempts to construct a new `Slab` backed by `backing_allocator`.
     ///
-    /// In particular, the memory managed by this `Slab` is allocated from
-    /// `backing_allocator` according to the layout indicated by
-    /// [`Self::region_layout(num_blocks)`][0].
+    /// The memory managed by this `Slab` is allocated from `backing_allocator` according to the
+    /// layout indicated by [`Self::region_layout(num_blocks)`][0].
     ///
     /// # Errors
     ///
-    /// Returns an error if sufficient memory could not be allocated from
-    /// `backing_allocator`.
+    /// Returns an error if sufficient memory could not be allocated from `backing_allocator`.
     ///
     /// [0]: Slab::region_layout
     #[cfg_attr(docs_rs, doc(cfg(feature = "unstable")))]
@@ -219,8 +221,7 @@ impl<A> Slab<A>
 where
     A: BackingAllocator,
 {
-    /// Returns the layout requirements of the region managed by a `Slab` of
-    /// this type.
+    /// Returns the layout requirements of the region managed by a `Slab` of this type.
     ///
     /// # Errors
     ///
@@ -239,6 +240,10 @@ where
             up & !(align - 1)
         };
 
+        if block_size < mem::size_of::<BlockLink>() {
+            return Err(AllocInitError::InvalidConfig);
+        }
+
         let total_size = block_size
             .checked_mul(num_blocks)
             .ok_or(AllocInitError::InvalidConfig)?;
@@ -254,15 +259,17 @@ where
 
     /// Attempts to allocate a block of memory with the specified layout.
     ///
-    /// The returned block is guaranteed to be aligned to `1 <<
-    /// block_size.trailing_zeros()` bytes.
+    /// The returned block is guaranteed to be aligned to [`self.block_align()`][1] bytes.
     ///
     /// # Errors
     ///
     /// Returns `Err` if any of the following are true:
-    /// - Either of `layout.size()` or `layout.align()` are greater than
-    ///   `block_size`.
     /// - No blocks are available.
+    /// - `layout.size()` is greater than the value returned by [`self.block_size()`][0].
+    /// - `layout.align()` is greater than the value returned by [`self.block_align()`][1].
+    ///
+    /// [0]: Slab::block_size
+    /// [1]: Slab::block_align
     pub fn allocate(&mut self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         if layout.size() > self.block_size as usize || layout.align() > self.block_align as usize {
             return Err(AllocError);
@@ -282,9 +289,11 @@ where
 
     /// Attempts to allocate a block of memory from the slab.
     ///
-    /// The layout of the returned block is determined by the allocator
-    /// configuration. The returned block is guaranteed to be aligned to `1 <<
-    /// block_size.trailing_zeros()` bytes.
+    /// The returned block has a size of [`self.block_size()`][0] and an alignment of
+    /// [`self.block_align()`][1].
+    ///
+    /// [0]: Slab::block_size
+    /// [1]: Slab::block_align
     ///
     /// # Errors
     ///
@@ -306,8 +315,7 @@ where
     ///
     /// # Safety
     ///
-    /// `ptr` must denote a block of memory [*currently allocated*] via this
-    /// allocator.
+    /// `ptr` must denote a block of memory [*currently allocated*] via this allocator.
     ///
     /// [*currently allocated*]: https://doc.rust-lang.org/nightly/alloc/alloc/trait.Allocator.html#currently-allocated-memory
     pub unsafe fn deallocate(&mut self, ptr: NonNull<u8>) {
@@ -321,20 +329,7 @@ where
         self.outstanding -= 1;
     }
 
-    /// Returns a pointer to the managed region.
-    ///
-    /// It is undefined behavior to dereference the returned pointer or upgrade
-    /// it to a reference if there are any outstanding allocations.
-    #[inline]
-    pub fn region(&mut self) -> NonNull<[u8]> {
-        NonNull::new(ptr::slice_from_raw_parts_mut(
-            self.base.ptr().as_ptr(),
-            self.size(),
-        ))
-        .unwrap()
-    }
-
-    /// Returns the size in bytes of an allocated block.
+    /// Returns the size in bytes of blocks allocated by this `Slab`.
     ///
     /// # Example
     ///
@@ -356,7 +351,7 @@ where
         self.block_size as usize
     }
 
-    /// Returns the minimum alignment of an allocated block.
+    /// Returns the minimum alignment of blocks allocated by this `Slab`.
     ///
     /// # Example
     ///
@@ -424,8 +419,7 @@ where
 
     /// Returns the first address above the managed region.
     ///
-    /// If the managed region ends at the end of the address space, returns
-    /// `None`.
+    /// If the managed region ends at the end of the address space, returns `None`.
     #[inline]
     pub fn limit(&self) -> Option<NonZeroUsize> {
         self.base
@@ -437,17 +431,17 @@ where
 
     /// Returns `true` _iff_ `ptr` is within this allocator's managed region.
     ///
-    /// Note that a return value of `true` does not indicate that `ptr` points
-    /// to an outstanding allocation.
+    /// Note that a return value of `true` does not indicate whether or not `ptr` points into an
+    /// outstanding allocation.
     #[inline]
     pub fn contains_ptr(&self, ptr: NonNull<u8>) -> bool {
         self.base.addr() <= ptr.addr() && self.limit().map(|lim| ptr.addr() < lim).unwrap_or(true)
     }
 
-    /// Returns `true` _iff_ this allocator has allocated all its memory.
+    /// Returns `true` _iff_ this allocator can make at least one additional allocation.
     #[inline]
-    pub fn is_full(&self) -> bool {
-        self.free_list.is_none()
+    pub fn can_allocate(&self) -> bool {
+        self.free_list.is_some()
     }
 
     /// Returns the number of outstanding allocations.
@@ -535,19 +529,14 @@ impl RawSlab {
             .addr()
             .get()
             .checked_add(layout.size())
+            .and_then(NonZeroUsize::new)
             .ok_or(AllocInitError::InvalidLocation)?;
-
-        // SAFETY: region_end was calculated via checked addition on the address
-        // of a NonNull.
-        let region_end = unsafe { NonZeroUsize::new_unchecked(region_end) };
 
         let base = BasePtr::new(region, layout.size());
 
         // Initialize the free list by emplacing links in each block.
         for block_addr in (region.addr().get()..region_end.get()).step_by(block_size) {
-            // SAFETY: block_addr is a step between region.addr() and
-            // region_end, both of which are nonzero.
-            let block_addr = unsafe { NonZeroUsize::new_unchecked(block_addr) };
+            let block_addr = NonZeroUsize::new(block_addr).unwrap();
 
             // Safe unchecked sub: region_end is nonzero.
             let is_not_last = block_addr.get() < region_end.get() - block_size;
@@ -558,9 +547,7 @@ impl RawSlab {
                 // and block_size is the step.
                 let next_addr = block_addr.get() + block_size;
 
-                // SAFETY: next_addr is known to be greater than block_addr and
-                // not to have overflown.
-                unsafe { NonZeroUsize::new_unchecked(next_addr) }
+                NonZeroUsize::new(next_addr).unwrap()
             });
 
             assert_eq!(block_addr.get() % mem::align_of::<BlockLink>(), 0);
@@ -629,10 +616,12 @@ mod tests {
         const BLK_SIZE: usize = 128;
         let mut slab = Slab::<Global>::try_new(BLK_SIZE, 1).unwrap();
 
+        assert!(slab.can_allocate());
         let layout = Layout::from_size_align(0, 1).unwrap();
         let b = slab.allocate(layout).unwrap();
         assert_eq!(slab.outstanding(), 1);
 
+        assert!(!slab.can_allocate());
         slab.allocate(layout).unwrap_err();
         assert_eq!(slab.outstanding(), 1);
         unsafe { slab.deallocate(b.cast()) };
@@ -651,40 +640,50 @@ mod tests {
 
         // Allocate a, b
         // Free a, b
+        assert!(slab.can_allocate());
         let a = slab.allocate(layout).unwrap();
         assert_eq!(slab.outstanding(), 1);
 
+        assert!(slab.can_allocate());
         let b = slab.allocate(layout).unwrap();
         assert_eq!(slab.outstanding(), 2);
 
+        assert!(!slab.can_allocate());
         slab.allocate(layout).unwrap_err();
         assert_eq!(slab.outstanding(), 2);
 
         unsafe {
             slab.deallocate(a.cast());
             assert_eq!(slab.outstanding(), 1);
+            assert!(slab.can_allocate());
 
             slab.deallocate(b.cast());
             assert_eq!(slab.outstanding(), 0);
+            assert!(slab.can_allocate());
         }
 
         // Allocate a, b
         // Free b, a
+        assert!(slab.can_allocate());
         let a = slab.allocate(layout).unwrap();
         assert_eq!(slab.outstanding(), 1);
 
+        assert!(slab.can_allocate());
         let b = slab.allocate(layout).unwrap();
         assert_eq!(slab.outstanding(), 2);
 
+        assert!(!slab.can_allocate());
         slab.allocate(layout).unwrap_err();
         assert_eq!(slab.outstanding(), 2);
 
         unsafe {
             slab.deallocate(b.cast());
             assert_eq!(slab.outstanding(), 1);
+            assert!(slab.can_allocate());
 
             slab.deallocate(a.cast());
             assert_eq!(slab.outstanding(), 0);
+            assert!(slab.can_allocate());
         }
     }
 }
