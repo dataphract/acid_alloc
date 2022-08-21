@@ -1,12 +1,12 @@
-//! Bare metal-friendly allocators.
+//! Bare-metal allocators.
 //!
 //! ---
-//!
-//! This crate provides allocators that can function without the backing of another allocator. This
-//! makes them suitable for use on bare metal or with OS allocation facilities like
-//! `mmap(2)`/`brk(2)`.
+//! This crate provides allocators that are suitable for use on bare metal or with low-level
+//! allocation facilities like `mmap(2)`/`brk(2)`.
 //!
 //! ## Allocators
+//!
+//! The following allocators are available:
 //!
 //! - **[`Buddy`], a binary-buddy allocator**. O(log<sub>2</sub>_levels_) worst-case allocation and
 //!   deallocation. Supports splitting and coalescing blocks by powers of 2. Good choice for
