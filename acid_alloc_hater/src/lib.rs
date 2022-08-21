@@ -2,7 +2,7 @@
 
 use std::{alloc::Layout, ops::Range, ptr::NonNull};
 
-use acid_alloc::{AllocInitError, Buddy, Global, Slab};
+use acid_alloc::{AllocInitError, Buddy, Bump, Global, Slab};
 use alloc_hater::Subject;
 
 pub struct BuddySubject<const BLK_SIZE: usize, const LEVELS: usize>(
@@ -56,9 +56,32 @@ impl Subject for SlabSubject {
         self.0.allocate(layout)
     }
 
-    unsafe fn deallocate(&mut self, ptr: NonNull<u8>, _layout: std::alloc::Layout) {
+    unsafe fn deallocate(&mut self, ptr: NonNull<u8>, _layout: Layout) {
         unsafe { self.0.deallocate(ptr) };
     }
 
     fn handle_custom_op(&mut self, (): ()) {}
+}
+
+pub struct BumpSubject(Bump<Global>);
+
+impl BumpSubject {
+    pub fn new(layout: Layout) -> Result<Self, AllocInitError> {
+        let b = Bump::try_new(layout)?;
+        Ok(BumpSubject(b))
+    }
+}
+
+impl Subject for BumpSubject {
+    type Op = ();
+
+    type AllocError = acid_alloc::AllocError;
+
+    fn allocate(&mut self, layout: Layout) -> Result<NonNull<[u8]>, Self::AllocError> {
+        self.0.allocate(layout)
+    }
+
+    unsafe fn deallocate(&mut self, ptr: NonNull<u8>, _layout: Layout) {
+        unsafe { self.0.deallocate(ptr) }
+    }
 }

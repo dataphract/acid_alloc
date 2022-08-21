@@ -44,7 +44,6 @@ use crate::Global;
 /// A bump allocator.
 pub struct Bump<A: BackingAllocator> {
     base: BasePtr,
-    limit: NonZeroUsize,
     low_mark: NonZeroUsize,
     outstanding: usize,
     layout: Layout,
@@ -76,7 +75,6 @@ impl Bump<Raw> {
         let lower_limit = self.low_mark;
         let lower = Bump {
             base: BasePtr::new(self.base.ptr(), lower_size),
-            limit: lower_limit,
             outstanding: 0,
             low_mark: lower_limit,
             layout: Layout::from_size_align(lower_size, 1).unwrap(),
@@ -87,7 +85,6 @@ impl Bump<Raw> {
         let new_base = BasePtr::new(self.base.with_addr(self.low_mark), upper_size);
         let upper = Bump {
             base: new_base,
-            limit: self.limit,
             low_mark: self.low_mark,
             outstanding: self.outstanding,
             // TODO: Alignment may be higher in some cases. Is that useful with Raw?
@@ -229,7 +226,7 @@ where
 
         if self.outstanding == 0 {
             // Reset the allocator.
-            self.low_mark = self.limit;
+            self.low_mark = self.base.limit();
         }
     }
 
@@ -241,14 +238,13 @@ where
     /// # Safety
     ///
     /// The caller must uphold the following invariants:
-    /// - No references to data allocated by this `Bump` may exist when the method
-    ///   is called.
-    /// - Any pointers to data previously allocated by this allocator may no
-    ///   longer be dereferenced or passed to [`Bump::deallocate()`].
+    /// - No references to data allocated by this `Bump` may exist when the method is called.
+    /// - Any pointers to data previously allocated by this allocator may no longer be dereferenced
+    ///   or passed to [`Bump::deallocate()`].
     ///
     /// [`Bump::deallocate()`]: Bump::deallocate
     pub unsafe fn reset(&mut self) {
-        self.low_mark = self.limit;
+        self.low_mark = self.base.limit();
     }
 
     /// Returns a pointer to the managed region.
@@ -283,7 +279,6 @@ where
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Bump")
             .field("base", &self.base)
-            .field("limit", &self.limit)
             .field("low_mark", &self.low_mark)
             .finish()
     }
@@ -299,7 +294,6 @@ impl RawBump {
     fn with_backing_allocator<A: BackingAllocator>(self, backing_allocator: A) -> Bump<A> {
         Bump {
             base: self.base,
-            limit: self.limit,
             low_mark: self.limit,
             outstanding: 0,
             layout: self.layout,
