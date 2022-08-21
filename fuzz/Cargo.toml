@@ -39,3 +39,9 @@ name = "slab"
 path = "fuzz_targets/slab.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "bump"
+path = "fuzz_targets/bump.rs"
+test = false
+doc = false
