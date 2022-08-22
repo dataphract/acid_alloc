@@ -1,13 +1,18 @@
 [package]
 name = "acid_alloc"
+description = "Bare-metal allocators"
 authors = ["dataphract <dataphract@gmail.com>"]
 version = "0.1.0"
 edition = "2021"
-description = "Bare-metal allocators"
-readme = "README.md"
-repository = "https://github.com/dataphract/acid_alloc"
 license = "MIT OR Apache-2.0"
+
+repository = "https://github.com/dataphract/acid_alloc"
+documentation = "https://docs.rs/acid_alloc"
+readme = "README.md"
+
+# crates.io configuration
 keywords = ["allocator", "no_std"]
+categories = ["memory-management", "no-std"]
 
 [package.metadata.docs.rs]
 all-features = true
