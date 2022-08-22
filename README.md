@@ -1,10 +1,13 @@
 # `acid_alloc`
 
-## Bare metal-friendly allocators.
+[![CI](https://github.com/dataphract/acid_alloc/actions/workflows/ci.yaml/badge.svg)](https://github.com/dataphract/acid_alloc/actions)
+[![crates-io](https://img.shields.io/crates/v/acid_alloc.svg)](https://crates.io/crates/acid_alloc)
+[![api-docs](https://docs.rs/acid_alloc/badge.svg)](https://docs.rs/acid_alloc)
 
-This crate provides allocators that can function without the backing of another
-allocator. This makes them suitable for use on bare metal or with OS allocation
-facilities like `mmap(2)`/`brk(2)`.
+## Bare-metal allocators.
+
+This crate provides allocators that are suitable for use on bare metal or with
+OS allocation facilities like `mmap(2)`/`brk(2)`.
 
 The following allocator types are available:
 
@@ -46,7 +49,7 @@ available when enabling feature flags:
   <td>Yes</td>
   <td>
    Exposes constructors for allocators backed by implementors of the
-   unstable<code>Allocator</code> trait, and enables the internal use of
+   unstable <code>Allocator</code> trait, and enables the internal use of
    nightly-only Rust features. Obviates <code>sptr</code>.
   </td>
  </tr>
@@ -69,8 +72,8 @@ standard-library APIs whose implementations are reproduced verbatim here. These
 features are listed below along with their authors and/or maintainers:
 
 - `alloc_layout_extra`, by [Amanieu d'Antras]
-- `int_log`, by [yoshuawuyts]
-- `strict_provenance` for `NonNull<T>`, by [Aria Beingessner (Gankra)]
+- `int_log`, by [Yoshua Wuyts]
+- `strict_provenance`, by [Aria Beingessner (Gankra)]
 
 This crate also depends on [`sptr`] (also authored by Gankra) to reproduce
 strict provenance for normal pointers on stable Rust.
@@ -78,9 +81,8 @@ strict provenance for normal pointers on stable Rust.
 _If I've misattributed any of this work, or a contributor to these features is
 missing, please open an issue!_
 
-[library api team]: https://www.rust-lang.org/governance/teams/library#Library%20API%20team
 [amanieu d'antras]: https://github.com/Amanieu
-[yoshuawuyts]: https://github.com/yoshuawuyts
+[yoshua wuyts]: https://github.com/yoshuawuyts
 [aria beingessner (gankra)]: https://github.com/Gankra
 
 ## License

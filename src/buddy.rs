@@ -27,7 +27,6 @@ use core::{
     iter::{self, Peekable},
     mem::ManuallyDrop,
     ops::Range,
-    ptr,
 };
 
 use crate::core::{
@@ -391,6 +390,13 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> Buddy<BLK_SIZE, LEVELS, Raw> {
     /// - `metadata` must be a pointer to a region that satisfies the [`Layout`] returned by
     ///   [`Self::metadata_layout(num_blocks)`], and it must be valid for reads and writes for the
     ///   entire size indicated by that `Layout`.
+    /// - The regions pointed to by `region` and `metadata` must not overlap.
+    /// - No references to the memory at `region` or `metadata` may exist when this function is
+    ///   called.
+    /// - As long as the returned `Buddy` exists:
+    ///     - No accesses may be made to the memory at `region` except by way of methods on the
+    ///       returned `Buddy`.
+    ///     - No accesses may be made to the memory at `metadata`.
     ///
     ///  # Errors
     ///
@@ -413,13 +419,23 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> Buddy<BLK_SIZE, LEVELS, Raw> {
 
     /// Constructs a new `Buddy` from raw pointers without populating it.
     ///
+    /// The returned `Buddy` will be unable to allocate until address ranges are made available to
+    /// it using [`Buddy::add_region`]. See [unpopulated initialization] for details.
+    ///
+    /// [unpopulated initialization]: crate::buddy::Buddy#unpopulated-initialization
+    ///
     /// # Safety
     ///
+    /// The caller must uphold the following invariants:
     /// - `region` must be a pointer to a region that satisfies the [`Layout`] returned by
     ///   [`Self::region_layout(num_blocks)`].
     /// - `metadata` must be a pointer to a region that satisfies the [`Layout`] returned by
     ///   [`Self::metadata_layout(num_blocks)`], and it must be valid for reads and writes for the
     ///   entire size indicated by that `Layout`.
+    /// - The regions pointed to by `region` and `metadata` must not overlap.
+    /// - No references to the memory at `metadata` may exist when this function is called.
+    /// - As long as the returned `Buddy` exists, no accesses may be made to the memory at
+    ///   `metadata`.
     ///
     /// [`Self::region_layout(num_blocks)`]: Self::region_layout
     /// [`Self::metadata_layout(num_blocks)`]: Self::metadata_layout
@@ -437,10 +453,23 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> Buddy<BLK_SIZE, LEVELS, Raw> {
 
     /// Populates a region not already managed by this allocator.
     ///
+    /// # Panics
+    ///
+    /// This method panics if any of the following are true:
+    /// - Either bound of `addr_range` falls outside the allocator region.
+    /// - Either bound of `addr_range` is not aligned to the value returned by
+    ///   [`Self::min_block_size()`][0].
+    ///
+    /// [0]: Buddy::min_block_size
+    ///
     /// # Safety
     ///
-    /// `range` must be a range of addresses not already managed by this
-    /// allocator.
+    /// The caller must uphold the following invariants:
+    /// - `range` must not overlap any range of addresses already managed by this allocator.
+    /// - No references to the memory indicated by `addr_range` may exist when this function is
+    ///   called.
+    /// - As long as `self` exists, no accesses may be made to the memory indicated by `addr_range`
+    ///   except by way of methods on `self`.
     pub unsafe fn add_region(&mut self, addr_range: Range<NonZeroUsize>) {
         unsafe { self.raw.add_region(addr_range) };
     }
@@ -755,19 +784,6 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: BackingAllocator> Buddy<BLK_
     /// [*currently allocated*]: https://doc.rust-lang.org/nightly/alloc/alloc/trait.Allocator.html#currently-allocated-memory
     pub unsafe fn deallocate(&mut self, ptr: NonNull<u8>) {
         unsafe { self.raw.deallocate(ptr) }
-    }
-
-    /// Returns a pointer to the managed region.
-    ///
-    /// # Safety
-    ///
-    /// Calling this function cannot cause undefined behavior. However:
-    /// - Reading from the returned pointer, including upgrading it to a reference, is undefined
-    ///   behavior if there are any outstanding allocations.
-    /// - Writing to the returned pointer, including upgrading it to a mutable reference, is
-    ///   _always_ undefined behavior.
-    pub fn region(&mut self) -> NonNull<[u8]> {
-        self.raw.region()
     }
 }
 
@@ -1210,23 +1226,6 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> RawBuddy<BLK_SIZE, LEVELS> {
         }
 
         assert!(block.is_none(), "top level coalesced a block");
-    }
-
-    /// Returns a pointer to the managed region.
-    ///
-    /// # Safety
-    ///
-    /// Calling this function cannot cause undefined behavior. However:
-    /// - Reading from the returned pointer, including upgrading it to a reference, is undefined
-    ///   behavior if there are any outstanding allocations.
-    /// - Writing to the returned pointer, including upgrading it to a mutable reference, is
-    ///   _always_ undefined behavior.
-    pub fn region(&mut self) -> NonNull<[u8]> {
-        NonNull::new(ptr::slice_from_raw_parts_mut(
-            self.base.ptr().as_ptr(),
-            self.num_blocks.get() * BLK_SIZE,
-        ))
-        .unwrap()
     }
 }
 

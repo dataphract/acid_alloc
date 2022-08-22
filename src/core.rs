@@ -18,8 +18,12 @@ pub(crate) mod alloc {
 
     use crate::layout_error;
 
-    /// Indicates an allocation failure due to resource exhaustion or an unsupported
-    /// set of arguments.
+    /// Indicates that an allocation failed.
+    ///
+    /// This may occur due to resource exhaustion or an unsupported set of arguments.
+    ///
+    /// When the `unstable` feature is enabled, this type is a re-export of
+    /// [`core::alloc::AllocError`].
     #[derive(Copy, Clone, PartialEq, Eq, Debug)]
     pub struct AllocError;
 
@@ -155,7 +159,8 @@ pub(crate) mod ptr {
         where
             T: Sized,
         {
-            // SAFETY: The result of `ptr::from::with_addr` is non-null because `addr` is guaranteed to be non-zero.
+            // SAFETY: The result of `ptr::from::with_addr` is non-null because `addr` is guaranteed
+            // to be non-zero.
             unsafe { NonNull::new_unchecked(self.as_ptr().with_addr(addr.get()) as *mut _) }
         }
 

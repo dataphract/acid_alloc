@@ -44,7 +44,7 @@
 //!   <td>Yes</td>
 //!   <td>
 //!    Exposes constructors for allocators backed by implementors of the
-//!    unstable<code>Allocator</code> trait, and enables the internal use of
+//!    unstable <code>Allocator</code> trait, and enables the internal use of
 //!    nightly-only Rust features. Obviates <code>sptr</code>.
 //!   </td>
 //!  </tr>
@@ -60,6 +60,7 @@
 //!
 //! [`sptr`]: https://crates.io/crates/sptr
 
+#![doc(html_root_url = "https://docs.rs/acid_alloc/0.1.0")]
 #![no_std]
 #![warn(missing_debug_implementations)]
 #![warn(missing_docs)]
@@ -183,6 +184,9 @@ requires_sptr_or_unstable! {
     }
 
     /// A marker type indicating that an allocator is backed by raw pointers.
+    ///
+    /// Allocators using this type will not deallocate owned memory on drop. The memory can be
+    /// reclaimed using the appropriate `.into_raw_parts()` method.
     #[derive(Clone, Debug)]
     pub struct Raw;
     impl Sealed for Raw {}
@@ -192,6 +196,9 @@ requires_sptr_or_unstable! {
 
     #[cfg(all(any(feature = "alloc", test), not(feature = "unstable")))]
     /// The global memory allocator.
+    ///
+    /// When both the `alloc` and `unstable` features are enabled, this type is a re-export of
+    /// [`alloc::alloc::Global`].
     #[derive(Clone, Debug)]
     pub struct Global;
 

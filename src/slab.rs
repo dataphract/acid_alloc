@@ -1,8 +1,8 @@
 //! Slab allocation.
 //!
-//! A slab allocator divides the managed region into a fixed number of
-//! equally-sized blocks. This design has limited flexibility, as the blocks
-//! cannot be split or coalesced; all allocations have the same size.
+//! A slab allocator divides the managed region into a fixed number of equally-sized blocks. This
+//! design is ideal for allocating many values of a single type, and a combination of slab sizes can
+//! be useful in constructing more general-purpose allocators.
 //!
 //! ## Characteristics
 //!
@@ -82,18 +82,18 @@ impl Slab<Raw> {
     ///
     /// # Errors
     ///
-    /// Returns an error if the `Layout` indicated by [`Self::region_layout()`][0] would not fit
-    /// between `region` and the end of the address space.
+    /// Returns an error if [`Slab::region_layout(block_size, num_blocks)`][0] would return an error
+    /// due to overflow.
     ///
     /// # Safety
     ///
     /// The caller must uphold the following invariants:
     /// - `region` must be a pointer to a region that fits the [`Layout`] returned by
-    ///   [`Self::region_layout()`][0], and it must be valid for reads and writes for the entire
-    ///   size indicated by that `Layout`.
+    ///   [`Slab::region_layout(block_size, num_blocks)`][0], and it must be valid for reads and
+    ///   writes for the entire size indicated by that `Layout`.
     /// - No references to the memory at `region` may exist when this function is called.
     /// - As long as the returned `Slab` exists, no accesses may be made to the memory at `region`
-    ///   except by methods on the returned `Slab`.
+    ///   except by way of methods on the returned `Slab`.
     ///
     /// [module-level documentation]: crate::slab
     /// [0]: Slab::region_layout
@@ -177,7 +177,7 @@ where
     /// Attempts to construct a new `Slab` backed by `backing_allocator`.
     ///
     /// The memory managed by this `Slab` is allocated from `backing_allocator` according to the
-    /// layout indicated by [`Self::region_layout(num_blocks)`][0].
+    /// layout indicated by [`Slab::region_layout(block_size, num_blocks)`][0].
     ///
     /// # Errors
     ///

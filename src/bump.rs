@@ -16,12 +16,11 @@
 //!
 //! #### Fragmentation
 //!
-//! Because bump allocators can allocate blocks of any size, they suffer minimal
-//! internal fragmentation. External fragmentation correlates linearly with the
-//! amount of deallocated data until all blocks are deallocated or the allocator
-//! is manually reset.
+//! Because bump allocators can allocate blocks of any size, they suffer minimal internal
+//! fragmentation. External fragmentation becomes significant when many deallocations occur
+//! without deallocating all outstanding allocations.
 
-use core::{fmt, ptr};
+use core::fmt;
 
 use crate::{
     core::{
@@ -42,6 +41,10 @@ use crate::core::ptr::NonNullStrict;
 use crate::Global;
 
 /// A bump allocator.
+///
+/// For a general discussion of bump allocation, see the [module-level documentation].
+///
+/// [module-level documentation]: crate::bump
 pub struct Bump<A: BackingAllocator> {
     base: BasePtr,
     low_mark: NonZeroUsize,
@@ -55,7 +58,12 @@ impl Bump<Raw> {
     ///
     /// # Safety
     ///
-    /// `region` must be valid for reads and writes for `size` bytes.
+    /// The caller must uphold the following invariants:
+    /// - `region` must be a pointer to a region that fits `layout`, and it must be valid for reads
+    ///   and writes for the entire size indicated by `layout`.
+    /// - No references to the memory at `region` may exist when this function is called.
+    /// - As long as the returned `Bump` exists, no accesses may be made to the memory at `region`
+    ///   except by way of methods on the returned `Bump`.
     pub unsafe fn new_raw(
         region: NonNull<u8>,
         layout: Layout,
@@ -69,6 +77,8 @@ impl Bump<Raw> {
     /// unallocated memory, while the second manages all of `self`'s allocated
     /// memory; all prior allocations from `self` are backed by the second
     /// element.
+    // TODO: this API is not finalized. It should not be considered part of the stable public API.
+    #[doc(hidden)]
     pub fn split(self) -> (Bump<Raw>, Bump<Raw>) {
         let base_addr = self.base.addr();
         let lower_size = self.low_mark.get().checked_sub(base_addr.get()).unwrap();
@@ -97,16 +107,18 @@ impl Bump<Raw> {
 }
 
 #[cfg(all(any(feature = "alloc", test), not(feature = "unstable")))]
+#[cfg_attr(docs_rs, doc(cfg(all(feature = "alloc"))))]
 impl Bump<Global> {
     /// Attempts to construct a new `Bump` backed by the global allocator.
     ///
-    /// In particular, the memory managed by this `Bump` is allocated from the
-    /// global allocator according to `layout`.
+    /// The memory managed by this `Bump` is allocated from the global allocator according to
+    /// `layout`.
     ///
     /// # Errors
     ///
-    /// Returns an error if sufficient memory could not be allocated from the
-    /// global allocator.
+    /// Returns an error if any of the following are true:
+    /// - `layout.size()` is zero.
+    /// - Sufficient memory could not be allocated from the global allocator.
     pub fn try_new(layout: Layout) -> Result<Bump<Global>, AllocInitError> {
         if layout.size() == 0 {
             return Err(AllocInitError::InvalidConfig);
@@ -128,35 +140,35 @@ impl Bump<Global> {
 }
 
 #[cfg(all(any(feature = "alloc", test), feature = "unstable"))]
+#[cfg_attr(docs_rs, doc(cfg(all(feature = "alloc"))))]
 impl Bump<Global> {
     /// Attempts to construct a new `Bump` backed by the global allocator.
     ///
-    /// In particular, the memory managed by this `Bump` is allocated from the
-    /// global allocator according to `layout`.
+    /// The memory managed by this `Bump` is allocated from the global allocator according to
+    /// `layout`.
     ///
     /// # Errors
     ///
-    /// Returns an error if sufficient memory could not be allocated from the
-    /// global allocator.
+    /// Returns an error if sufficient memory could not be allocated from the global allocator.
     pub fn try_new(layout: Layout) -> Result<Bump<Global>, AllocInitError> {
         Self::try_new_in(layout, Global)
     }
 }
 
 #[cfg(feature = "unstable")]
+#[cfg_attr(docs_rs, doc(cfg(feature = "unstable")))]
 impl<A> Bump<A>
 where
     A: Allocator,
 {
     /// Attempts to construct a new `Bump` backed by `backing_allocator`.
     ///
-    /// In particular, the memory managed by this `Bump` is allocated from
-    /// `backing_allocator` according to `layout`.
+    /// The memory managed by this `Bump` is allocated from `backing_allocator` according to
+    /// `layout`.
     ///
     /// # Errors
     ///
-    /// Returns an error if sufficient memory could not be allocated from
-    /// `backing_allocator`.
+    /// Returns an error if sufficient memory could not be allocated from `backing_allocator`.
     pub fn try_new_in(layout: Layout, backing_allocator: A) -> Result<Bump<A>, AllocInitError> {
         unsafe {
             let region_ptr = backing_allocator
@@ -238,25 +250,13 @@ where
     /// # Safety
     ///
     /// The caller must uphold the following invariants:
-    /// - No references to data allocated by this `Bump` may exist when the method is called.
-    /// - Any pointers to data previously allocated by this allocator may no longer be dereferenced
-    ///   or passed to [`Bump::deallocate()`].
+    /// - No references to memory allocated by this `Bump` may exist when the method is called.
+    /// - Any pointers to memory previously allocated by this allocator may no longer be
+    ///   dereferenced or passed to [`Bump::deallocate()`].
     ///
     /// [`Bump::deallocate()`]: Bump::deallocate
     pub unsafe fn reset(&mut self) {
         self.low_mark = self.base.limit();
-    }
-
-    /// Returns a pointer to the managed region.
-    ///
-    /// It is undefined behavior to dereference the returned pointer or upgrade
-    /// it to a reference if there are any outstanding allocations.
-    pub fn region(&mut self) -> NonNull<[u8]> {
-        NonNull::new(ptr::slice_from_raw_parts_mut(
-            self.base.ptr().as_ptr(),
-            self.layout.size(),
-        ))
-        .unwrap()
     }
 }
 
