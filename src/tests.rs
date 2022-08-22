@@ -466,3 +466,9 @@ fn bump_allocations_are_mutually_exclusive() {
     let mut qc = QuickCheck::new().max_tests(MAX_TESTS);
     qc.quickcheck(check::<MutuallyExclusive<Bump<Global>>> as fn(_, _) -> bool);
 }
+
+// Version sync ================================================================
+#[test]
+fn html_root_url() {
+    version_sync::assert_html_root_url_updated!("src/lib.rs");
+}
