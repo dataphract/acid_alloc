@@ -1,8 +1,5 @@
 use crate::core::{alloc::Layout, mem};
 
-#[cfg(not(feature = "unstable"))]
-use crate::core::alloc::LayoutExt;
-
 pub struct Bitmap {
     num_bits: usize,
     map: *mut u64,
@@ -26,10 +23,9 @@ impl Bitmap {
     /// # Safety
     ///
     /// Behavior is undefined if any of the following conditions are violated:
-    /// - `map` must be valid for reads and writes for `len *
-    ///   mem::size_of::<u64>()` many bytes, and it must be properly aligned.
-    /// - `map` must point to `(num_bits + 63) / 64` consecutive properly
-    ///   initialized `u64` values.
+    /// - `map` must be valid for reads and writes for `len * mem::size_of::<u64>()` many bytes, and
+    ///   it must be properly aligned.
+    /// - `map` must point to `(num_bits + 63) / 64` consecutive properly initialized `u64` values.
     pub unsafe fn new(num_bits: usize, map: *mut u64) -> Bitmap {
         assert!(num_bits > 0);
         assert!(!map.is_null());
@@ -116,7 +112,7 @@ impl Bitmap {
     }
 
     #[cfg(test)]
-    pub fn iter(&self) -> BitmapIter {
+    pub fn iter(&self) -> BitmapIter<'_> {
         BitmapIter {
             idx: 0,
             bitmap: self,

@@ -31,13 +31,10 @@ use crate::core::{
 use alloc::alloc::Global;
 
 #[cfg(all(any(feature = "alloc", test), not(feature = "unstable")))]
-use crate::{core::alloc::LayoutExt, Global};
+use crate::Global;
 
 #[cfg(feature = "unstable")]
 use crate::core::alloc::Allocator;
-
-#[cfg(not(feature = "unstable"))]
-use crate::core::ptr::NonNullStrict;
 
 use crate::{AllocInitError, BackingAllocator, BasePtr, BlockLink, Raw};
 
@@ -120,14 +117,14 @@ impl Slab<Global> {
     /// Returns an error if sufficient memory could not be allocated from the global allocator.
     ///
     /// [0]: Slab::region_layout
-    #[cfg_attr(docs_rs, doc(cfg(feature = "alloc")))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
     pub fn try_new(block_size: usize, num_blocks: usize) -> Result<Slab<Global>, AllocInitError> {
         let region_layout = Self::region_layout(block_size, num_blocks)
             .map_err(|_| AllocInitError::InvalidConfig)?;
 
         unsafe {
             let region_ptr = if region_layout.size() == 0 {
-                region_layout.dangling()
+                region_layout.dangling_ptr()
             } else {
                 // SAFETY: region size is not zero
                 let region_raw = alloc::alloc::alloc(region_layout);
@@ -163,7 +160,7 @@ impl Slab<Global> {
     /// Returns an error if sufficient memory could not be allocated from the global allocator.
     ///
     /// [0]: Slab::region_layout
-    #[cfg_attr(docs_rs, doc(cfg(feature = "alloc")))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
     pub fn try_new(block_size: usize, num_blocks: usize) -> Result<Slab<Global>, AllocInitError> {
         Self::try_new_in(block_size, num_blocks, Global)
     }
@@ -184,7 +181,7 @@ where
     /// Returns an error if sufficient memory could not be allocated from `backing_allocator`.
     ///
     /// [0]: Slab::region_layout
-    #[cfg_attr(docs_rs, doc(cfg(feature = "unstable")))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     pub fn try_new_in(
         block_size: usize,
         num_blocks: usize,
@@ -195,7 +192,7 @@ where
 
         unsafe {
             let region_ptr = if region_layout.size() == 0 {
-                region_layout.dangling()
+                region_layout.dangling_ptr()
             } else {
                 backing_allocator
                     .allocate(region_layout)
@@ -448,6 +445,20 @@ where
     #[inline]
     pub fn outstanding(&self) -> usize {
         self.outstanding.try_into().unwrap()
+    }
+
+    /// Decomposes a `Slab` into its raw components if there are no outstanding allocations.
+    ///
+    /// If there are outstanding allocations, returns `Err(self)`.
+    #[inline]
+    pub fn into_raw_parts(self) -> Result<(NonNull<u8>, Layout), Self> {
+        if self.outstanding != 0 {
+            return Err(self);
+        }
+
+        let layout = Self::region_layout(self.block_size(), self.num_blocks()).unwrap();
+
+        Ok((self.base.ptr(), layout))
     }
 }
 

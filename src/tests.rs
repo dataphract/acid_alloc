@@ -5,12 +5,13 @@ use core::{marker::PhantomData, mem, ops::Range, ptr};
 
 use crate::{
     bump::Bump,
-    core::{alloc::Layout, cmp, fmt::Debug, ptr::NonNull, slice},
+    core::{alloc::Layout, cmp, fmt::Debug, ptr::NonNull},
     slab::Slab,
     AllocError, AllocInitError, Buddy, Global,
 };
 
 use alloc::{boxed::Box, vec::Vec};
+use core::slice;
 use quickcheck::{Arbitrary, Gen, QuickCheck};
 
 trait QcAllocator: Sized {
@@ -468,6 +469,7 @@ fn bump_allocations_are_mutually_exclusive() {
 }
 
 // Version sync ================================================================
+#[cfg(not(miri))]
 #[test]
 fn html_root_url() {
     version_sync::assert_html_root_url_updated!("src/lib.rs");

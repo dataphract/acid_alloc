@@ -21,8 +21,6 @@
 //! 50% internal fragmentation because all allocatable blocks have a
 //! power-of-two size.
 
-#![cfg(any(feature = "sptr", feature = "unstable"))]
-
 use core::{
     iter::{self, Peekable},
     mem::ManuallyDrop,
@@ -39,13 +37,6 @@ use crate::core::{
 
 #[cfg(feature = "unstable")]
 use crate::core::alloc::Allocator;
-
-#[cfg(not(feature = "unstable"))]
-use crate::core::{
-    alloc::LayoutExt,
-    num::UsizeExt,
-    ptr::{NonNullStrict, Strict},
-};
 
 #[cfg(all(any(feature = "alloc", test), feature = "unstable"))]
 use alloc::alloc::Global;
@@ -147,7 +138,7 @@ impl BuddyLevel {
     ///
     /// The caller must uphold the following invariants:
     /// - The memory at `block` must be within the provenance of `base` and valid for reads and
-    ///   writes for `size_of::<BlockLink>()` bytes.
+    ///   writes for `size_of::<DoubleBlockLink>()` bytes.
     /// - `block` must be the address of an element of `self.free_list`.
     unsafe fn free_list_remove(&mut self, base: BasePtr, block: NonZeroUsize) {
         unsafe {
@@ -567,7 +558,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize> Buddy<BLK_SIZE, LEVELS, Global>
     ///
     /// If allocation fails, or if the allocator configuration is invalid,
     /// returns `Err`.
-    #[cfg_attr(docs_rs, doc(cfg(feature = "alloc")))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
     pub fn try_new(num_blocks: usize) -> Result<Buddy<BLK_SIZE, LEVELS, Global>, AllocInitError> {
         Buddy::<BLK_SIZE, LEVELS, Global>::try_new_in(num_blocks, Global)
     }
@@ -598,7 +589,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: Allocator> Buddy<BLK_SIZE, L
     /// # Errors
     ///
     /// If allocation fails, returns `Err(AllocError)`.
-    #[cfg_attr(docs_rs, doc(cfg(feature = "unstable")))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     pub fn try_new_in(
         num_blocks: usize,
         allocator: A,
@@ -613,7 +604,7 @@ impl<const BLK_SIZE: usize, const LEVELS: usize, A: Allocator> Buddy<BLK_SIZE, L
     ///
     /// If allocation fails, returns `Err(AllocError)`.
     #[doc(hidden)]
-    #[cfg_attr(docs_rs, doc(cfg(feature = "unstable")))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     pub fn try_new_with_offset_gaps_in<I>(
         num_blocks: usize,
         gaps: I,
@@ -1319,7 +1310,8 @@ mod tests {
 
     extern crate std;
 
-    use crate::core::{alloc::Layout, ptr::NonNull, slice};
+    use crate::core::{alloc::Layout, ptr::NonNull};
+    use core::slice;
     use std::prelude::rust_2021::*;
 
     #[cfg(all(any(feature = "alloc", test), not(feature = "unstable")))]

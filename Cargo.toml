@@ -16,7 +16,7 @@ categories = ["memory-management", "no-std"]
 
 [package.metadata.docs.rs]
 all-features = true
-rustdoc-args = ["--cfg", "docs_rs"]
+rustdoc-args = ["--cfg", "docsrs"]
 
 [workspace]
 members = [
@@ -25,15 +25,13 @@ members = [
 ]
 
 [features]
-default = ["sptr"]
-
+default = []
 alloc = []
 
 # Enables nightly-only unstable Rust features.
 unstable = []
 
 [dependencies]
-sptr = { version = "0.2.3", optional = true }
 
 [dev-dependencies]
 quickcheck = "1.0.3"

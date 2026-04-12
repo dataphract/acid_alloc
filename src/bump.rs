@@ -34,9 +34,6 @@ use crate::{
 #[cfg(feature = "unstable")]
 use crate::core::alloc::Allocator;
 
-#[cfg(not(feature = "unstable"))]
-use crate::core::ptr::NonNullStrict;
-
 #[cfg(any(feature = "alloc", test))]
 use crate::Global;
 
@@ -107,7 +104,7 @@ impl Bump<Raw> {
 }
 
 #[cfg(all(any(feature = "alloc", test), not(feature = "unstable")))]
-#[cfg_attr(docs_rs, doc(cfg(all(feature = "alloc"))))]
+#[cfg_attr(docsrs, doc(cfg(all(feature = "alloc"))))]
 impl Bump<Global> {
     /// Attempts to construct a new `Bump` backed by the global allocator.
     ///
@@ -140,7 +137,7 @@ impl Bump<Global> {
 }
 
 #[cfg(all(any(feature = "alloc", test), feature = "unstable"))]
-#[cfg_attr(docs_rs, doc(cfg(all(feature = "alloc"))))]
+#[cfg_attr(docsrs, doc(cfg(all(feature = "alloc"))))]
 impl Bump<Global> {
     /// Attempts to construct a new `Bump` backed by the global allocator.
     ///
@@ -156,7 +153,7 @@ impl Bump<Global> {
 }
 
 #[cfg(feature = "unstable")]
-#[cfg_attr(docs_rs, doc(cfg(feature = "unstable")))]
+#[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
 impl<A> Bump<A>
 where
     A: Allocator,
@@ -257,6 +254,13 @@ where
     /// [`Bump::deallocate()`]: Bump::deallocate
     pub unsafe fn reset(&mut self) {
         self.low_mark = self.base.limit();
+    }
+
+    /// Decomposes the allocator into its raw components.
+    ///
+    /// Returns the raw pointer to the managed region and the layout of that region.
+    pub fn into_raw_parts(self) -> (NonNull<u8>, Layout) {
+        (self.base.ptr(), self.layout)
     }
 }
 

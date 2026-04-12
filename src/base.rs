@@ -3,9 +3,6 @@ use crate::core::{
     ptr::{self, NonNull},
 };
 
-#[cfg(not(feature = "unstable"))]
-use crate::core::ptr::{NonNullStrict, Strict};
-
 /// A pointer to the base of the region of memory managed by an allocator.
 #[derive(Copy, Clone, Debug)]
 pub struct BasePtr {
@@ -60,8 +57,8 @@ impl BasePtr {
     ///
     /// The caller must uphold the following invariants:
     /// - `addr` must be a properly aligned address for `BlockLink` values.
-    /// - The memory at `addr` must be within the provenance of `self` and valid
-    ///   for reads and writes for `size_of::<BlockLink>()` bytes.
+    /// - The memory at `addr` must be within the provenance of `self` and valid for reads and
+    ///   writes for `size_of::<BlockLink>()` bytes.
     /// - The memory at `addr` must be unallocated by the associated allocator.
     #[inline]
     pub unsafe fn init_link_at(self, addr: NonZeroUsize, link: BlockLink) {
@@ -87,8 +84,8 @@ impl BasePtr {
     ///
     /// The caller must uphold the following invariants:
     /// - `addr` must be a properly aligned address for `DoubleBlockLink` values.
-    /// - The memory at `addr` must be within the provenance of `self` and valid
-    ///   for reads and writes for `size_of::<DoubleBlockLink>()` bytes.
+    /// - The memory at `addr` must be within the provenance of `self` and valid for reads and
+    ///   writes for `size_of::<DoubleBlockLink>()` bytes.
     /// - The memory at `addr` must be unallocated by the associated allocator.
     #[inline]
     pub unsafe fn init_double_link_at(self, addr: NonZeroUsize, link: DoubleBlockLink) {
@@ -118,8 +115,8 @@ impl BasePtr {
     /// The caller must uphold the following invariants:
     /// - `link` must be a properly aligned address for `BlockLink` values.
     /// - The memory at `link` must contain a properly initialized `BlockLink` value.
-    /// - The memory at `link` must be within the provenance of `self` and
-    ///   unallocated by the associated allocator.
+    /// - The memory at `link` must be within the provenance of `self` and unallocated by the
+    ///   associated allocator.
     #[inline]
     pub unsafe fn link_mut<'a>(self, link: NonZeroUsize) -> &'a mut BlockLink {
         debug_assert!(self.contains_addr(link));
@@ -134,8 +131,8 @@ impl BasePtr {
     /// The caller must uphold the following invariants:
     /// - `link` must be a properly aligned address for `DoubleBlockLink` values.
     /// - The memory at `link` must contain a properly initialized `DoubleBlockLink` value.
-    /// - The memory at `link` must be within the provenance of `self` and
-    ///   unallocated by the associated allocator.
+    /// - The memory at `link` must be within the provenance of `self` and unallocated by the
+    ///   associated allocator.
     #[inline]
     pub unsafe fn double_link_mut<'a>(self, link: NonZeroUsize) -> &'a mut DoubleBlockLink {
         debug_assert!(self.contains_addr(link));
